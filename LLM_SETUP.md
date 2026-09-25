@@ -11,9 +11,9 @@
 
 | 项 | 值 | 状态 |
 |---|---|---|
-| 厂商 | DeepSeek（`https://api.deepseek.com`） | 计划 |
-| 模型名 | `deepseek-flash` | 计划 |
-| 协议 | OpenAI 兼容 Chat Completions（`POST {LLM_BASE_URL}/chat/completions`） | 计划 |
+| 厂商 | DeepSeek（`https://api.deepseek.com`） | **已接入并实测**（2026-09-26，见 §7.4） |
+| 模型名 | `deepseek-flash`（DeepSeek-V4.1-Flash，`GET /models` 实测确认存在） | **已接入并实测** |
+| 协议 | OpenAI 兼容 Chat Completions（`POST {LLM_BASE_URL}/chat/completions`） | 已实测 |
 | SDK | 不用 SDK，直接用 `httpx`（starter 现有依赖） | 现状 |
 | 为什么这么选 | 契约 §7.1 推荐的路线；评审时评委就是用这一套切。不用官方 SDK 是为了把"地址原样拼接"这条握在自己手里（SDK 的 `base_url` 处理方式在不同版本间变过） | — |
 
@@ -234,14 +234,55 @@ P14   保持连接的空行与 SSE 注释没有把服务弄坏                  
 
 ---
 
+### 7.4 真实 Key 下的接入验证与全量评测（2026-09-26）
+
+拿到真实 DeepSeek Key 后，按第 3 节的步骤（只改环境变量、零代码改动）切换并全量评测：
+
+```bash
+# 1) 停掉 mock 模式的旧服务
+# 2) 三个环境变量重启服务（Windows Git Bash 写法；PowerHELL 见第 3 节）
+cd starter
+LLM_BASE_URL=https://api.deepseek.com \
+LLM_API_KEY=<真实 Key> \
+LLM_MODEL=deepseek-flash \
+.venv/Scripts/python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000
+
+# 3) 确认切换生效
+curl http://localhost:8000/api/health        # "llm_mode": "live"
+
+# 4) 全量评测
+python eval/run_eval.py --base-url http://localhost:8000 \
+    --questions eval/public_questions.jsonl --out eval/_live_raw
+```
+
+实测记录（代码 commit `6301aea`）：
+
+| 检查 | 结果 |
+|---|---|
+| `GET /models` 能列出 `deepseek-flash` | 通过（DeepSeek-V4.1-Flash，1M 上下文，思考模式默认开启） |
+| `/api/health` → `llm_mode=live` | 通过 |
+| 冒烟：数据题「S02 6 月净营业额」 | 通过：真实查询 43,655.00 元，`data_evidence` 带完整 query_metrics 结果 |
+| 冒烟：文档题「外卖订单多久内可退款」 | 通过：引用现行版本 KB-013（退款政策 v2）——版本时效在真实模型下正常 |
+| 公开题库 55 题 | **87.50 / 100**（mock 是 100.00；失分三类根因见 `EVAL_REPORT.md` §6 与 `DEBUG_LOG.md` #27–#29） |
+| 自补题库 12 题 | **26.00 / 28.00** |
+| Key 是否入库/进 trace | 否——只通过环境变量注入进程；`tests/test_no_secrets.py` 保持全绿 |
+
+**换真实模型不需要改任何代码**——第 3 节的步骤原样走通，这正是预检 P1–P14
+想保证的事。真实模型带来的三个作答层回归（证据尺寸 / 估算数字纪律 / 工具循环 4 轮上限）
+与协议无关，属于 P6 待修项，全部记录在 `DEBUG_LOG.md`。
+
+---
+
 ## 8. 已知限制
 
 清楚但还没解决的，一并写在这里。
 
-1. **本机没有可用的真实 DeepSeek Key**，所以第 7 节的自测是**假模型**下的结果，
-   `EVAL_REPORT.md` §3 的 88.00 分也是**无 Key 的 mock 降级模式**跑出来的。
-   代码路径、参数、错误处理都按契约 §7.3 对齐并过了预检（P1–P14），
-   但"真实模型下的作答质量"这一项我们没有数据。
+1. **真实 Key 已接入（2026-09-26），live 全量结果 87.50 / 100**（`EVAL_REPORT.md` §6）。
+   三个失分根因已定位、未修复（`DEBUG_LOG.md` #27–#29）：
+   live 引擎的 `data_evidence` 不做尺寸收口（4 题，回答本身全对）；
+   估算数字纪律未传导给模型（H02，把"大概 150 份"写进了解释）；
+   工具循环 4 轮上限对"检索不到就换词再试"的真实模型偏低（H06/T02-3，
+   撞顶后按设计返回结构化 refusal、不编数字——兜底方向对，收口过早）。
 2. **流式输出还没做**（契约 §7.3 最后一行）。`/api/chat` 目前是非流式，
    `delta.reasoning_content` → `delta.content` 的顺序处理、前端"思考中"状态都在 P4。
    预检里与流式有关的项会显示"未检查"而不是"通过"。
