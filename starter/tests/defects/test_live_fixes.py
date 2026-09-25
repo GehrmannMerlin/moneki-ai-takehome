@@ -265,10 +265,13 @@ def test_no_explanation_answer_clears_citations(service):
     client = ScriptedClient([
         _tool_reply("daily_metrics",
                     {"start": "2026-08-17", "end": "2026-08-19", "store_id": "S02"}),
+        # 措辞取自真实 Key 复评的原句：数据事实的"没有任何交易"在前，
+        # 真正的"原因：没有找到"在后——第一版实现只看第一个匹配，漏判了这种顺序。
         _content_reply(
-            "S02 在 8 月 17—19 日营业额均为 0 元、订单 0 单，三天完全没有交易。"
-            "停业的具体原因没有找到相关通知或说明；我查过停业通知与例会纪要 "
-            "[KB-020] [KB-027] [KB-029]，都只涉及其他门店。"),
+            "S02 在 8 月 17—19 日三天完全没有任何交易，营业额均为 0 元、订单 0 单，"
+            "前后两天经营正常。原因：没有找到。我检索了停业、装修、台风闭店等方向，"
+            "只找到其他门店的通知 [KB-020] [KB-027] [KB-042]，没有任何一份文档解释"
+            " S02 这三天停止营业的原因。"),
     ])
     answer = _engine(service, client).answer(plan, _trace(service, "x"), [])
     assert not answer.citations, (
