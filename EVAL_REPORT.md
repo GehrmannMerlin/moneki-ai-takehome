@@ -397,9 +397,52 @@ KB-022 的 `doc_score` 最低（7.01，排第四），被挤到第三位、被 `
 
 ---
 
-## §4 P4/P5 之后（前端、调试面板、收尾）
+## §4 P4 之后（前端看板 + 对话栏 + 调试面板）：100.00 / 100（保持）
 
-_待 P4/P5 完成后填写。_
+| 项 | 值 |
+|---|---|
+| 得分 | **100.00 / 100.00（100.0%）**，55 题全绿 / 共 55 题（与 P3 持平，P4 不动问答逻辑） |
+| 运行命令 | `cd starter && .venv/Scripts/python scripts/regression.py --skip-tests`（自带起服务+对比） |
+| 代码 commit | `3366889`（后端路由隔离）、`523578a`（前端 + dist）、`17d9068`（评测即回归） |
+| 模型 | **无**（未配置任何 Key，`llm_mode=mock`） |
+| 是否配置 Key | 否 |
+| 原始报告 | `eval/_regression_raw/report.json` |
+| 测试 | `pytest tests` → **216 passed**（新增 `test_frontend_api.py` 6 条 + `test_hybrid_merge.py` 8 条） |
+| 自补题库 | `eval/extra_questions.jsonl` 12 题 → **28.00 / 28.00 全绿** |
+
+### 本阶段交付（第四关 8 分 + UI/创新）
+
+1. **零构建启动**：`frontend/`（Vue3 + Vite + TS）构建产物入库 `starter/kbqa/static/`，
+   评委 `make run` 之后开 `http://localhost:8000` 即见完整 UI，不需要 Node。
+2. **经营看板**：KPI 五卡（净营业额/订单/客单价/销量/退款）、每日趋势（ECharts）、
+   商品 Top10、数据质量面板（六项剔除柱状 + 守恒校验行）。
+   数据全部来自 `/api/metrics/*` 与新增的 `/api/metrics/top_products`、`/api/meta/options`，
+   与问答链路同一个 `MetricsEngine`，口径一致是结构保证。
+3. **对话栏**：sessionStorage 会话保持（刷新不断、新标签不串线）、`answer_type` 五色徽章、
+   引用角标（点击展开 quote 原文）、`data_evidence` 抽屉；
+   **图表联动**：回答里出现日期窗口时趋势图用 `markArea` 高亮该区间。
+4. **调试面板**（契约 §6 可视化）：`/api/trace/{trace_id}` 全要素——
+   安全闸/规划/区间闸/意图复核/检索/作答/响应的时间线（每步 at_ms + took_ms）、
+   完整 LLM 调用（提示词与原始输出）、错误堆栈。
+5. **评测即回归**：`scripts/regression.py` 一条命令跑「pytest → 起服务 → 题库 →
+   与基线分类对比」，回退即非零退出；`make regression`（`QUESTIONS=` 可换自补题库）。
+
+### P4 出口检查单
+
+- [x] 干净环境不配 Key 起服务 → 看板/对话/调试面板全部可用（mock 模式）
+- [x] 调试面板覆盖契约 §6 全要素；DEMO.md 演示素材就绪（P5 写 DEMO.md 时直接用）
+- [x] `make regression` 一键出分类对比表（公开题库 100.00、自补题 28.00 全绿）
+- [x] /api/* 无任何 3xx；SPA fallback 不吞 API 404（`test_frontend_api.py` 钉死）
+
+### P4 已知限制（不藏）
+
+1. **流式输出仍未做**（契约 §7.3 最后一行），`/api/chat` 非流式；对话栏用"思考中…"过渡。
+   P5 若有余量按 SSE 加分项补 `/api/chat/stream`。
+2. **前端无组件级单测**（Vitest 未引入）：P4 设计的 `FilterBar/ChatPanel/TraceOverlay`
+   三条组件测试以「后端契约测试 + 手工走查」代替，理由是组件逻辑薄（纯渲染 + 转发），
+   引入 Vitest + jsdom 会让评审环境多装 ~80MB 依赖。这是文档限制范围内自己的决定。
+3. **dist 单 JS 约 1.18MB**（ECharts 占大头，gzip 后 399KB）：内网/本地使用可接受，
+   未做按需加载。
 
 ---
 
