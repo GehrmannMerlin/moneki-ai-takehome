@@ -77,14 +77,21 @@ def _tool_reply(name: str, args: dict, seq: int = 0) -> LLMReply:
 
 
 class ScriptedClient:
-    """按剧本回话的假模型；记录每次调用收到的 tools，供断言。"""
+    """按剧本回话的假模型；记录每次调用收到的 tools，供断言。
 
-    def __init__(self, replies: list[LLMReply]) -> None:
+    `forced` 是强制作答轮（tools=None，模型没拿到工具定义）的固定回话——
+    真实 API 在没给工具时不可能返回 tool_calls，这里如实模拟。
+    """
+
+    def __init__(self, replies: list[LLMReply], forced: LLMReply | None = None) -> None:
         self.replies = list(replies)
+        self.forced = forced
         self.calls: list[dict] = []
 
     def chat_with_retry(self, messages, tools=None, budget=None, on_call=None):
         self.calls.append({"tools": tools})
+        if tools is None and self.forced is not None:
+            return self.forced
         if not self.replies:
             raise AssertionError("假模型的剧本演完了还被调用（工具循环没收敛）")
         return self.replies.pop(0)
@@ -254,10 +261,12 @@ def test_tool_loop_exhaustion_forces_final_answer(service):
     正确行为：轮数用尽后再给模型一次**没有工具可调**的机会，让它把
     "没有找到相关文档"和数据事实用正文说出来。
     """
-    #: 前若干轮永远在要工具；强制作答轮给出正文。
+    #: 前若干轮永远在要工具；强制作答轮（没拿到工具定义）只能给正文。
     script = [_tool_reply("search_kb", {"query": "尝试第%d轮" % i}, seq=i) for i in range(12)]
-    script.append(_content_reply("没有找到解释这种情况的文档；已知数据事实是这几天营业额为 0。"))
-    client = ScriptedClient(script)
+    client = ScriptedClient(
+        script,
+        forced=_content_reply("没有找到解释这种情况的文档；已知数据事实是这几天营业额为 0。"),
+    )
     plan = service.planner.plan("S02 在 8 月 17 日到 19 日为什么一分钱营业额都没有？")
 
     engine = _engine(service, client)
