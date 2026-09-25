@@ -377,7 +377,7 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 - [x] `pytest tests` → **202 passed**
 - [x] `DEBUG_LOG.md` 累计 **19 条闭环**（P3 新增 6 条，其中 4 条是排查中新发现的）
 
-### P3 已知限制（不藏）
+### P3 已知限制
 
 1. **最终得分是 mock 降级模式的**。本机没有可用的真实 DeepSeek Key，
    所以 `EVAL_REPORT.md` §3 的 88.00 是**无 Key** 跑出来的。
@@ -443,7 +443,7 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 - [x] 数据质量接口产出六项剔除计数（`/api/data_quality`，供 P4 前端直接消费）
 - [x] `make test` 85 passed / 2 failed —— 2 条红的是缺陷 #11 的 P2 复现测试，故意留着
 
-### P1 已知限制（不藏）
+### P1 已知限制
 
 1. **`kb_docs` 仍是 36（应为 35）。** N01 只有 `valid_sales_rows` 绿了。
    两层原因都在 P2：`service.py` 数的是目录文件数（含无编号的 `README.md`），
@@ -466,7 +466,7 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 - [x] 索引缓存从版本库删除 + `.gitignore` 补 `.cache/`、`var/`
 - [x] Makefile 平台兼容（Windows/POSIX 自动选 venv 路径，不再依赖 `uv`）
 
-### P0 已知限制（不藏）
+### P0 已知限制
 
 1. **Windows 上重建前必须停服务**（见第一节的警告框）——SQLite 文件锁，POSIX 无此问题。
 2. **`make` 本机没有**（Windows 默认不带）。`make setup` 用 `python -m venv` + `pip`，

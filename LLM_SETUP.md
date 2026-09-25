@@ -114,7 +114,7 @@ python eval/llm_gateway.py proxy --upstream https://api.deepseek.com --log llm_t
 
 > **已知不足（P3 修）**：`llm.py:184-186` 的 `_preview()` 把 prompt 与 raw_content
 > **截断到 4000 字**，而契约 §6 要求"完整提示词和模型原始输出"。P3 会改成完整留存
-> （体积大时写文件、trace 里存路径）。这一条现在写在《8. 已知限制》里，不藏。
+> （体积大时写文件、trace 里存路径）。这一条写在《8. 已知限制》里。
 
 ---
 
