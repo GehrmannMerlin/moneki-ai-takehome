@@ -7,6 +7,11 @@ venv/
 
 # 评测脚本跑出来的临时报告（eval/baseline_report.json 是有意入库的基线证据）
 eval/report.json
+eval/_fix*_raw/
+eval/_p*_raw/
+eval/_verify_raw/
+eval/_baseline_raw/
+eval/_preflight/
 eval/report.md
 eval/__pycache__/
 docs/_*.txt
