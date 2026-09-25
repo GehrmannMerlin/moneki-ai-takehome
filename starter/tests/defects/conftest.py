@@ -43,24 +43,29 @@ def source_db() -> Path:
 
 @pytest.fixture(scope="module")
 def legacy_clean_db(tmp_path_factory, source_db: Path) -> Path:
-    """用 **starter 原有的** `kbqa.cleaning.build_clean_db` 建一份 clean.db。
+    """用当前清洗实现建一份 clean.db。
 
-    只依赖 `sales_clean` 这一张表——旧 schema 直接建表，新 schema 用兼容视图提供，
-    所以同一个夹具在新核心落地前后都能跑，差别只在"表里的内容对不对"。
+    这个夹具在做复现测试时指向的是 **starter 老实现**（`kbqa.cleaning`），
+    新核心（`kbqa.core.cleaning`）落地后改指新实现——同一批断言，
+    先红后绿，红→绿的分界就是 `fix: D1–D4` 那个 commit。
+
+    只依赖 `sales_clean` 这个名字：新 schema 用兼容视图提供它，
+    所以断言不用跟着 schema 一起改。
     """
-    from kbqa.cleaning import build_clean_db
+    from kbqa.core.cleaning import build_clean_db
 
-    target = tmp_path_factory.mktemp("legacy") / "clean.db"
+    target = tmp_path_factory.mktemp("clean") / "clean.db"
     build_clean_db(source_db, target)
     return target
 
 
 @pytest.fixture(scope="module")
 def legacy_tools(legacy_clean_db: Path):
-    """指向那份 clean.db 的 starter DataTools。"""
-    from kbqa.tools import DataTools
+    """指向那份 clean.db 的数据工具（当前实现）。"""
+    from kbqa.core.datatools import DataTools
+    from kbqa.core.metrics import MetricsEngine
 
-    return DataTools(legacy_clean_db)
+    return DataTools(MetricsEngine(legacy_clean_db))
 
 
 def row_count(db: Path, where: str = "1=1", params: tuple = ()) -> int:
