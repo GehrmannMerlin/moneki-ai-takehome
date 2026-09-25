@@ -1,25 +1,86 @@
 """测试夹具。
 
-检索这块在测试里整个换成固定返回，这样测试就不用跟着知识库一起改，
-跑起来也快。要看真实检索效果直接起服务问两句就行。
+约定（P0 起全项目通用）：
+
+* 一律用 ``tmp_var`` 把 ``VAR_DIR`` 指到临时目录，测试之间互不污染，
+  也不碰 ``starter/var`` 与 ``starter/.cache``。
+* 期望值常量写在这里。**fixture 里写死是合法的**——它们是判据；
+  产品代码里写死数字才是违规（评委第 3 步会换 data/ 与 knowledge_base/）。
+* ``quote`` 的逐字校验用的是评测脚本自己那套实现（``eval/run_eval.py``），
+  不在这里另写一份，避免"测试绿了但评测红"。
 """
 
 from __future__ import annotations
 
-import os
+import importlib.util
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+WORKSPACE = Path(__file__).resolve().parents[2]      # 作业包根：data/ 与 knowledge_base/ 所在
+STARTER = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(STARTER))
+
+PUBLIC_QUESTIONS = WORKSPACE / "eval" / "public_questions.jsonl"
+RUN_EVAL = WORKSPACE / "eval" / "run_eval.py"
+
+#: 独立复算得到的期望值（来源：KB-001 v3 + eval/public_questions.jsonl，逐条对上）。
+#: 这些是**目标值**：starter 现在达不到，红测试就是拿来暴露差距的。
+EXPECTED = {
+    "raw_sales_rows": 18628,
+    "valid_sales_rows": 18290,
+    "kb_docs": 35,              # 入索引的文档数；目录里另有 1 份无编号的 README.md
+    "kb_files_including_readme": 36,
+    "removed": {
+        "1_unparseable_date": 8,      # 含 3 行 '2026-13-45'：格式合法但日历非法
+        "2_empty_amount": 150,
+        "3_qty_le_zero": 30,
+        "4_store_not_in_stores": 10,
+        "5_product_not_in_products": 40,
+        "6_duplicate_row": 100,
+    },
+    "data_period": {"start": "2026-05-01", "end": "2026-08-31"},
+    "today": "2026-09-01",
+}
+
+
+@pytest.fixture(scope="session")
+def workspace() -> Path:
+    """作业包根目录。"""
+    return WORKSPACE
+
+
+def _python_bin() -> Path:
+    """当前解释器所在的 venv 的 python（让子进程测试和 pytest 用同一套依赖）。"""
+    return Path(sys.executable)
+
+
+@pytest.fixture()
+def python_bin() -> Path:                                # noqa: ANN201 - pytest fixture
+    return _python_bin()
+
+
+@pytest.fixture()
+def tmp_var(tmp_path, monkeypatch) -> Path:
+    """每个测试一个独立 VAR_DIR。"""
+    var = tmp_path / "var"
+    monkeypatch.setenv("VAR_DIR", str(var))
+    return var
+
+
+#: test_api.py 的冒烟测试用的固定片段。检索换成固定返回，接口测试就不跟着
+#: 知识库一起变；要验真实检索效果就看 test_p0_infra / test_retrieval 那几个。
 FAKE_TEXT = "退款政策 v2 > 三、时限：外卖订单在订单送达后 24 小时内可以申请退款。"
 
 
 @pytest.fixture(scope="session")
 def client(tmp_path_factory):
+    """接口冒烟用的 TestClient：检索整个换成固定返回，不起真实索引。"""
+    import os
+
     os.environ["VAR_DIR"] = str(tmp_path_factory.mktemp("var"))
     for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
         os.environ.pop(key, None)
@@ -49,3 +110,34 @@ def client(tmp_path_factory):
 
     retriever_module.Retriever.search = fake_search
     return TestClient(server.app)
+
+
+@pytest.fixture(scope="session")
+def run_eval_module():
+    """把 eval/run_eval.py 当模块载入，复用评测脚本自己的规范化与逐字校验。
+
+    必须先把模块登记进 ``sys.modules``：run_eval.py 用了
+    ``from __future__ import annotations``，dataclass 解析字符串注解时要回头
+    查 ``sys.modules[cls.__module__]``，没登记就会 AttributeError。
+    """
+    name = "_dsh_run_eval"
+    spec = importlib.util.spec_from_file_location(name, RUN_EVAL)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+@pytest.fixture(scope="session")
+def public_questions() -> list[dict]:
+    items: list[dict] = []
+    with PUBLIC_QUESTIONS.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                items.append(json.loads(line))
+    return items
