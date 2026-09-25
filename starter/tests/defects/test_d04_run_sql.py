@@ -23,10 +23,12 @@ from __future__ import annotations
 import pytest
 
 DROP = "DROP TABLE sales_clean"
+#: 每条都要**指名真实存在的数据**，否则语句影响 0 行，"数据没变"就没有说服力。
 WRITES = [
-    ("update", "UPDATE sales_clean SET amount_cents = 0"),
-    ("delete", "DELETE FROM sales_clean"),
+    ("update", "UPDATE sales_clean SET amount_cents = 0 WHERE date >= '2026-06-01'"),
+    ("delete", "DELETE FROM sales_clean WHERE date >= '2026-06-01'"),
     ("insert", "INSERT INTO stores VALUES ('S99','x','y','z')"),
+    ("drop", DROP),
 ]
 
 
@@ -46,13 +48,16 @@ def test_no_writable_sql_channel(legacy_tools):
         "DataTools 仍然暴露 run_sql()：任意 SQL 都能执行，且连接会 commit")
 
 
-@pytest.mark.parametrize("label,sql", WRITES + [("drop", DROP)],
-                         ids=[w[0] for w in WRITES] + ["drop"])
+@pytest.mark.parametrize("label,sql", WRITES, ids=[w[0] for w in WRITES])
 def test_write_attempt_leaves_data_unchanged(legacy_clean_db, label, sql):
     """写语句不许改到数据：攻击前后的指标必须逐字段相同。
 
     每个用例一条独立连接与独立查询，避免上一条语句把连接弄脏后
     影响这一条的判据（那正是第一版假绿的原因）。
+
+    `insert` 那条不影响 6 月指标（新增的门店没有销售行），
+    它的价值在"语句真的执行到了数据库上"——
+    要验"新增门店会改变门店数"得等按门店聚合的用例，P3 补。
     """
     tools = _fresh_tools(legacy_clean_db)
     before = tools.query_metrics("2026-06-01", "2026-06-30")

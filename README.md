@@ -3,10 +3,11 @@
 一家 5 门店连锁餐饮品牌的经营看板，加一个能同时查销售数据库和公司知识库的 AI 助手。
 系统的"今天"固定为 **2026-09-01**，数据区间 **2026-05-01 ~ 2026-08-31**。
 
-> **当前进度：P0（环境可复现 + 基线测绘）已完成。**
-> 看板与问答功能正在按 `docs/IMPLEMENTATION-PLAN.md` 的 P1–P5 推进，
-> 本 README 会随阶段推进更新。各阶段实际完成情况见文末《进度》一节。
-> 接手项目里原有的 RAG 服务缺陷分析与基线得分见 [`DEBUG_LOG.md`](DEBUG_LOG.md) 与 [`EVAL_REPORT.md`](EVAL_REPORT.md)。
+> **当前进度：P0（环境可复现 + 基线测绘）、P1（数据层 + 口径引擎 + metrics API）已完成。**
+> 公开题库得分 **17.00 → 42.50 / 100**。看板前端与检索层正在按
+> `docs/IMPLEMENTATION-PLAN.md` 的 P2–P5 推进，本 README 会随阶段推进更新。
+> 各阶段实际完成情况见文末《进度》一节；
+> 接手项目里原有 RAG 服务的缺陷分析与基线得分见 [`DEBUG_LOG.md`](DEBUG_LOG.md) 与 [`EVAL_REPORT.md`](EVAL_REPORT.md)。
 
 ---
 
@@ -173,12 +174,13 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 | 层 | 文件 | 现状 |
 |---|---|---|
 | HTTP | `kbqa/server.py` | 保留外壳，6 个契约接口都在 |
+| **数据** | **`kbqa/core/normalize.py`、`cleaning.py`、`metrics.py`、`datatools.py`** | **✅ P1 已重写**（六规则清洗 / v3+v2 口径引擎 / 只读数据工具） |
 | 编排 | `kbqa/service.py`、`planner.py`、`answerer.py`、`live.py` | 待 P3 重写编排与安全闸 |
-| 数据 | `kbqa/cleaning.py`、`tools.py` | 待 P1 重写清洗与口径引擎 |
 | 检索 | `kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py` | 待 P2 重写 |
 | 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`aliases.py`、`sanitize.py` | starter 里这些比预期完整，P2/P3 移植复用 |
 | 模型 | `kbqa/llm.py`、`toolspec.py` | 待 P3 按契约 §7 复核；接入说明见 [`LLM_SETUP.md`](LLM_SETUP.md) |
-| 基建 | `scripts/baseline_report.py`、`tests/` | **P0 已建**（分类基线脚本 + 31 条基建测试） |
+| 基建 | `scripts/baseline_report.py`、`tests/` | **P0 已建**；P1 起 `tests/defects/` 做缺陷复现、`tests/test_metrics.py` 做口径回归 |
+| ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`ace8d9a`），被 `kbqa/core/` 取代 |
 
 ### 选型理由
 
@@ -322,12 +324,36 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 
 | 阶段 | 交付 | 状态 |
 |---|---|---|
-| **P0** | 环境可复现 + 基线测绘 + 过程文件骨架 | ✅ **完成** |
-| P1 | 清洗层 + 口径引擎 + metrics API（第一关 12 分） | ⏳ 下一步 |
-| P2 | 混合检索层 + starter 缺陷修复留证（第二关 20 分） | ⏳ |
+| **P0** | 环境可复现 + 基线测绘 + 过程文件骨架 | ✅ **完成**（基线 17.00/100） |
+| **P1** | 清洗层 + 口径引擎 + metrics API（第一关 12 分） | ✅ **完成**（42.50/100，`metrics` 与 `data` 满分） |
+| P2 | 混合检索层 + starter 缺陷修复留证（第二关 20 分） | ⏳ 下一步 |
 | P3 | 问答编排 + LLM 接入 + preflight（第三关 22 分） | ⏳ |
 | P4 | 前端看板 + 对话栏 + 调试面板（第四关 8 分） | ⏳ |
 | P5 | 收尾验收 + 换库自验 | ⏳ |
+
+### P1 出口检查单
+
+- [x] 缺陷复现测试 28 条全绿（修复前 `26 failed, 2 passed`，原件存 `docs/_p1_red.txt`）
+- [x] 公开评测 `metrics` 6/6、`data` 12/12、`refusal` 8/8；总分 17.00 → **42.50**
+- [x] `valid_sales_rows = 18290`，六项剔除 8/150/30/10/40/100，守恒 18290 + 338 = 18628
+- [x] `DEBUG_LOG.md` 新增 4 条闭环记录（缺陷 #1–#4，含红证据与修复 commit）
+- [x] `EVAL_REPORT.md` §1 记录本阶段得分 + 分类对比表 + commit
+- [x] 数据质量接口产出六项剔除计数（`/api/data_quality`，供 P4 前端直接消费）
+- [x] `make test` 85 passed / 2 failed —— 2 条红的是缺陷 #11 的 P2 复现测试，故意留着
+
+### P1 已知限制（不藏）
+
+1. **`kb_docs` 仍是 36（应为 35）。** N01 只有 `valid_sales_rows` 绿了。
+   两层原因都在 P2：`service.py` 数的是目录文件数（含无编号的 `README.md`），
+   `loader.py:12` 又不收 `.txt`/`.html`，真正入索引的只有 32 篇（`kb_chunks=80`）。
+   P1 按计划不动检索层，提前改会让 N01 的失败原因变含糊。
+2. **`doc`/`version`/`hybrid` 三类仍然很低**（0/16、0/6、3/18）。
+   这些依赖检索层，不是数据层的问题——`retrieval` 只从 6 涨到 7 就是证据。
+3. **v2 口径只做到"能分别取到、结果不同"**，还没有任何题库题在考它。
+   它是 P3 版本类问题（V 系）的地基，届时才真正被使用。
+4. **`unit_price_check` 返回的 `latest_price` 是"实收单价"**，不是商品现行售价。
+   现行售价要以最新调价通知为准（KB-001 §5.3 / H04 期望 45 而建档价 42），
+   那一层属于文档侧，在 P3 处理。
 
 ### P0 出口检查单
 
@@ -348,3 +374,28 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
    `refusal`/`retrieval` 两类（检索依赖 BM25 排序，基线索引只有 53 块）。
    取舍理由写在 `EVAL_REPORT.md` §0，两个数字都保留。
 4. 前端看板、调试面板、流式输出、向量检索都还没做——它们分别是 P4 / P2 的内容。
+
+---
+
+## 六、口径落地速查（P1 之后）
+
+给评审现场调试用的对照表：**每一条口径在代码里的哪个位置。**
+
+| 口径（KB-001 v3） | 代码位置 |
+|---|---|
+| 编号 trim + upper | `core/normalize.py::norm_id` |
+| 日期三种格式 + 日历合法性校验 | `core/normalize.py::parse_date` |
+| 金额去 `¥`/空白、按 Decimal 转分 | `core/normalize.py::parse_amount_cents` |
+| 六条剔除规则（按序首因归因） | `core/cleaning.py::_first_reject` + `clean_rows` |
+| 守恒自验（不成立就 raise） | `core/cleaning.py::build_clean_db` |
+| 闭区间 | `core/metrics.py::MetricsEngine._where` |
+| 净营业额含退款 | `core/metrics.py::net_expr` |
+| 退款金额 | `core/metrics.py` 的 `refund_cents` 聚合 |
+| 有效订单数 = `DISTINCT order_id` | 同上 `orders` 聚合 |
+| 客单价 `ROUND_HALF_UP` 两位 | `core/metrics.py::round2` |
+| 销量 = 销售 qty − 退款 qty | 同上 `qty` 聚合 |
+| 空区间返回 0 / `aov=null` | `core/metrics.py::summary` |
+| daily 补零（每天必有一条） | `core/metrics.py::daily` |
+| v2 回填 `qty × unit_price` | `core/cleaning.py::backfill_cents` |
+| 只读连接（`mode=ro`） | `core/metrics.py::open_readonly` |
+| 差额 = 舍入后指标之差 | `core/datatools.py::compare_periods` |
