@@ -26,7 +26,7 @@ MIN_TOKENS = 5
 @pytest.mark.parametrize("query", QUERIES)
 def test_chinese_query_tokenizes_into_words(query):
     """中文查询必须切成多个词，而不是整句一个 token。"""
-    from kbqa.tokenizer import tokenize
+    from kbqa.core.tokenizer import tokenize
 
     tokens = tokenize(query)
     assert len(tokens) >= MIN_TOKENS, (
@@ -36,7 +36,7 @@ def test_chinese_query_tokenizes_into_words(query):
 
 def test_refund_query_splits_into_meaningful_words():
     """R02 的查询要能切出"退款""外卖"这类真正的词。"""
-    from kbqa.tokenizer import tokenize
+    from kbqa.core.tokenizer import tokenize
 
     tokens = tokenize("外卖订单多久内可以退款")
     for want in ("退款", "外卖"):
@@ -46,7 +46,7 @@ def test_refund_query_splits_into_meaningful_words():
 
 def test_english_aliases_not_split_apart():
     """商品别名不能被切碎（`牛肉poke` 是一个整体）。"""
-    from kbqa.tokenizer import tokenize
+    from kbqa.core.tokenizer import tokenize
 
     tokens = tokenize("牛肉poke 六月卖了多少钱")
     assert any("poke" in token for token in tokens), (
@@ -59,7 +59,7 @@ def test_query_and_document_share_tokens(index):
     这是"分词对不对"的终局判据：换一个能命中的查询当然容易，
     这里是说——同一个查询在**正确分词**下应该连上某个具体文档。
     """
-    from kbqa.tokenizer import tokenize
+    from kbqa.core.tokenizer import tokenize
 
     tokens = [t for t in tokenize("外卖订单多久内可以退款") if len(t) >= 2]
     assert tokens, "分词结果为空"
@@ -71,7 +71,7 @@ def test_query_and_document_share_tokens(index):
 
 def test_content_tokens_drops_stopwords():
     """内容词要滤掉虚词（保留 starter 的 STOP_CHARS 语义）。"""
-    from kbqa.tokenizer import content_tokens
+    from kbqa.core.tokenizer import content_tokens
 
     kept = content_tokens("外卖订单多久内可以退款")
     assert "的" not in kept and "了" not in kept

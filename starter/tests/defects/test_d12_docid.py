@@ -43,7 +43,7 @@ def test_hit_docid_matches_chunk_owner_on_every_chunk(index, today):
     挑查询来撞这件事不可靠（我第一版就是这样，8 个查询里只有 1 个撞上）。
     逐 chunk 遍历则每个位置都试一遍，稳定命中。
     """
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     wrong = []

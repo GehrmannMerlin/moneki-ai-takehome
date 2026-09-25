@@ -102,7 +102,7 @@ def test_cache_and_var_are_gitignored():
 
 def test_content_key_depends_on_kb_content(tmp_var, tmp_path):
     """改一个字，缓存键就得变——否则换一套知识库读的还是旧索引。"""
-    from kbqa.index import content_key
+    from kbqa.core.index import content_key
 
     kb = _stage_knowledge_base(tmp_path)
     target = sorted(kb.rglob("KB-003*"))[0]           # 别名词典：小文件，改起来快
@@ -117,7 +117,7 @@ def test_content_key_depends_on_kb_content(tmp_var, tmp_path):
 
 def test_content_key_changes_when_files_added_or_removed(tmp_var, tmp_path):
     """增删文件同样要改键——评委的隐藏知识库是"有增有改"的。"""
-    from kbqa.index import content_key
+    from kbqa.core.index import content_key
 
     kb = _fake_kb(tmp_path)
     before = content_key(kb)
@@ -137,10 +137,10 @@ def test_content_key_still_depends_on_code_versions(tmp_var, tmp_path, monkeypat
     """反向要求：改了切块或分词，键也必须变（这是 starter 唯一做对的那一半）。
 
     三个版本常量都是 ``index.py`` 自己模块里的名字（它 ``from .chunker import``
-    进来的），所以要 monkeypatch ``kbqa.index`` 上的那份，改 ``chunker`` 模块上
-    的那份是看不见的。
+    进来的），所以要 monkeypatch ``kbqa.core.index`` 上的那份，改 ``chunker``
+    模块上的那份是看不见的。
     """
-    from kbqa import index
+    from kbqa.core import index
 
     kb = _fake_kb(tmp_path)
     before = index.content_key(kb)
@@ -159,7 +159,7 @@ def test_content_key_still_depends_on_code_versions(tmp_var, tmp_path, monkeypat
 def test_rebuild_idempotent(tmp_var, tmp_path, workspace: Path):
     """连续两次重建，清洗结果与索引规模必须一致（缓存键正确时才成立）。"""
     from kbqa.core.cleaning import build_clean_db
-    from kbqa.index import load_index
+    from kbqa.core.index import load_index
 
     clean_db = tmp_path / "var" / "clean.db"
     index_path = tmp_path / "cache" / "index.json"
@@ -212,9 +212,9 @@ def test_run_eval_available(workspace: Path):
 
 
 @pytest.mark.parametrize("module_name,constant", [
-    ("kbqa.index", "INDEX_VERSION"),
-    ("kbqa.chunker", "CHUNKER_VERSION"),
-    ("kbqa.tokenizer", "TOKENIZER_VERSION"),
+    ("kbqa.core.index", "INDEX_VERSION"),
+    ("kbqa.core.chunker", "CHUNKER_VERSION"),
+    ("kbqa.core.tokenizer", "TOKENIZER_VERSION"),
 ])
 def test_version_constants_exist(module_name: str, constant: str):
     """缓存键的三个输入项必须真的存在（重构时别把它们弄丢了）。"""

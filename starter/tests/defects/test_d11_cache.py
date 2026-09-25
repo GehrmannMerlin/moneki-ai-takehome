@@ -30,7 +30,7 @@ def _copy_kb(tmp_path) -> "object":
 
 def test_key_follows_kb_content(tmp_path):
     """改知识库任一文件 → 缓存键变化。"""
-    from kbqa.index import content_key
+    from kbqa.core.index import content_key
 
     kb = _copy_kb(tmp_path)
     before = content_key(kb)
@@ -43,7 +43,7 @@ def test_key_follows_kb_content(tmp_path):
 
 def test_key_follows_file_addition(tmp_path):
     """新增文件 → 缓存键变化。评委的隐藏知识库是"有增有改"的。"""
-    from kbqa.index import content_key
+    from kbqa.core.index import content_key
 
     kb = _copy_kb(tmp_path)
     before = content_key(kb)
@@ -54,7 +54,7 @@ def test_key_follows_file_addition(tmp_path):
 
 def test_key_follows_file_deletion(tmp_path):
     """删除文件 → 缓存键变化。"""
-    from kbqa.index import content_key
+    from kbqa.core.index import content_key
 
     kb = _copy_kb(tmp_path)
     before = content_key(kb)
@@ -64,7 +64,7 @@ def test_key_follows_file_deletion(tmp_path):
 
 def test_load_index_rebuilds_on_content_change(tmp_path):
     """端到端：改了知识库之后 `load_index` 必须重建，而不是读回旧索引。"""
-    from kbqa.index import load_index
+    from kbqa.core.index import load_index
 
     kb = _copy_kb(tmp_path)
     cache = tmp_path / "index.json"
@@ -87,7 +87,7 @@ def test_load_index_rebuilds_on_content_change(tmp_path):
 
 def test_loaded_index_is_usable(tmp_path):
     """缓存命中的索引必须能正常检索（缓存格式不能丢信息）。"""
-    from kbqa.index import load_index
+    from kbqa.core.index import load_index
 
     kb = _copy_kb(tmp_path)
     cache = tmp_path / "index.json"

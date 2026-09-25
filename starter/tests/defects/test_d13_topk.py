@@ -73,7 +73,7 @@ def test_deprecated_docs_declare_status(index):
 
 def test_eligibility_rejects_deprecated_versions_as_of_today(index, today):
     """as_of=今天时，三篇已废止版本都必须被判为不合格。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     still_eligible = [doc_id for doc_id in DEPRECATED
@@ -85,7 +85,7 @@ def test_eligibility_rejects_deprecated_versions_as_of_today(index, today):
 
 def test_deprecated_doc_appears_in_filtered_list(index, today):
     """端到端：过滤结果里必须出现已废止的版本。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     result = retriever.search("会员储值 充值 送", top_k=5, as_of=today)
@@ -96,7 +96,7 @@ def test_deprecated_doc_appears_in_filtered_list(index, today):
 
 def test_exactly_topk_after_filtering(index, today):
     """先过滤后截取：结果必须恰好 top_k 条。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     result = retriever.search("会员储值 充值 送", top_k=5, as_of=today)
@@ -107,7 +107,7 @@ def test_exactly_topk_after_filtering(index, today):
 @pytest.mark.parametrize("query", ["充值", "退款", "会员储值", "政策", "500"])
 def test_exactly_topk_for_policy_queries(index, today, query):
     """政策类查询最容易撞上已废止版本。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     result = retriever.search(query, top_k=5, as_of=today)
@@ -116,7 +116,7 @@ def test_exactly_topk_for_policy_queries(index, today, query):
 
 def test_deprecated_doc_ranked_first_is_excluded(index, today):
     """最狠的一种情形：已废止版本分数最高。过滤之后它不能出现在结果里。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     result = retriever.search("会员储值政策 单笔充值", top_k=5, as_of=today)
@@ -126,7 +126,7 @@ def test_deprecated_doc_ranked_first_is_excluded(index, today):
 
 def test_no_filtered_doc_leaks(index, today):
     """通用断言：结果里不能出现被过滤掉的文档。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     for query in ("充值", "退款政策", "会员", "过敏原"):
@@ -138,7 +138,7 @@ def test_no_filtered_doc_leaks(index, today):
 
 def test_archived_docs_are_not_filtered(index, today):
     """`status=归档` 的文档不参与版本过滤（归档 ≠ 废止，历史周报仍是资料）。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     archived = [doc_id for doc_id, meta in index.docs_meta.items()
@@ -151,7 +151,7 @@ def test_archived_docs_are_not_filtered(index, today):
 
 def test_results_are_ranked_descending(index, today):
     """契约 §4：按相关性从高到低排序。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     scores = [hit.score for hit in retriever.search("退款政策", top_k=5).hits]
@@ -160,7 +160,7 @@ def test_results_are_ranked_descending(index, today):
 
 def test_enough_eligible_candidates(index, today):
     """前提确认：合格 chunk 足够多，所以"凑不满 top_k"只可能是顺序错。"""
-    from kbqa.retriever import Retriever
+    from kbqa.core.retriever import Retriever
 
     retriever = Retriever(index, today)
     result = retriever.search("充值", top_k=5, as_of=today)

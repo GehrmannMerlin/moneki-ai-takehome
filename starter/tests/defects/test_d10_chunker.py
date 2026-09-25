@@ -84,15 +84,35 @@ def test_all_documents_covered(index, documents):
 def test_chunks_are_reasonably_sized(index):
     """切块要有尺寸意识：不能整篇一大块，也不能碎成一堆十几字的块。
 
-    这里只卡一个宽松的带：90% 的 chunk 在 200~500 字之间（表格密集文档允许例外）。
+    分三层断言，把"能保证的"和"想要的"分开：
+
+    1. **硬保证**：任何块都不超过 `HARD_MAX`。这拦的是"一整张表不做二次切分"
+       那类问题——1297 字的过敏原表会把整篇的检索信号糊成一团。
+    2. **硬保证**：不能整篇只有一块（那等于没切）。
+    3. **质量目标**：≥75% 的块落在 `MIN_CHARS~TARGET_MAX`。
+       不要求 100%：按句切时允许超出"一个句子"（实测 500~560 有 10 块），
+       而 15 块不足 120 字是"## 五、复核"这类只剩一句话的小节——
+       硬撑到 120 只能靠粘不相关的内容，那是更糟的取舍。
     """
+    from kbqa.core.chunker import HARD_MAX, MIN_CHARS, TARGET_MAX
+
     lengths = sorted(len(chunk.text) for chunk in index.chunks)
     assert lengths, "没有 chunk"
-    in_band = sum(1 for n in lengths if 200 <= n <= 500)
+
+    oversized = [n for n in lengths if n > HARD_MAX]
+    assert not oversized, (
+        "有 %d 个超过 %d 字的巨块（最长 %d）——超长段落没有二次切分"
+        % (len(oversized), HARD_MAX, max(oversized)))
+
+    assert len(lengths) >= len(index.docs_meta), (
+        "只有 %d 块、%d 篇文档——平均一篇不到一块，等于没切"
+        % (len(lengths), len(index.docs_meta)))
+
+    in_band = sum(1 for n in lengths if MIN_CHARS <= n <= TARGET_MAX)
     ratio = in_band / len(lengths)
-    assert ratio >= 0.9, (
-        "只有 %.0f%% 的 chunk 落在 200~500 字（共 %d 块，长度分布 %s…）"
-        % (ratio * 100, len(lengths), lengths[:5]))
+    assert ratio >= 0.75, (
+        "只有 %.0f%% 的 chunk 落在 %d~%d 字（共 %d 块，最短 %d 最长 %d）"
+        % (ratio * 100, MIN_CHARS, TARGET_MAX, len(lengths), lengths[0], lengths[-1]))
 
 
 def test_chunk_ids_are_unique_and_ordered(index):

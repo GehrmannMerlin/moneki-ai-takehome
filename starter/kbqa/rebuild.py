@@ -8,7 +8,7 @@ import time
 
 from .core.cleaning import build_clean_db
 from .config import load_settings
-from .index import load_index
+from .core.index import load_index
 
 
 def main() -> int:
