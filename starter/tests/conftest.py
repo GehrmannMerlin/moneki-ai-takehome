@@ -87,7 +87,7 @@ def client(tmp_path_factory):
 
     from fastapi.testclient import TestClient
 
-    from kbqa import retriever as retriever_module
+    from kbqa.core import retriever as retriever_module
     from kbqa import server
 
     def fake_search(self, query, top_k=5, **kwargs):

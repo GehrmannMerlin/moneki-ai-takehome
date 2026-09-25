@@ -11,9 +11,9 @@ from .docfacts import DocFacts, carries
 from .entities import Catalog, expected_value_kind, focus_kinds
 from .hybrid import HybridAnswers
 from .planner import Plan
-from .retriever import Retriever, SearchResult
+from .core.retriever import Retriever, SearchResult
 from .schemas import Answer
-from .tokenizer import content_tokens, tokenize
+from .core.tokenizer import content_tokens, tokenize
 
 #: 拒答闸门。两个互补的信号：
 #: `vocab` —— 问题里的词有多少在整个知识库的词表里出现过（“工资”“下雨”一个都找不到）；

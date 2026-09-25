@@ -3,9 +3,10 @@
 一家 5 门店连锁餐饮品牌的经营看板，加一个能同时查销售数据库和公司知识库的 AI 助手。
 系统的"今天"固定为 **2026-09-01**，数据区间 **2026-05-01 ~ 2026-08-31**。
 
-> **当前进度：P0（环境可复现 + 基线测绘）、P1（数据层 + 口径引擎 + metrics API）已完成。**
-> 公开题库得分 **17.00 → 42.50 / 100**。看板前端与检索层正在按
-> `docs/IMPLEMENTATION-PLAN.md` 的 P2–P5 推进，本 README 会随阶段推进更新。
+> **当前进度：P0（环境可复现）、P1（数据层 + 口径引擎）、P2（检索层）已完成。**
+> 公开题库得分 **17.00 → 42.50 → 53.00 / 100**。
+> `metrics` / `retrieval` / `data` / `refusal` / `health` 五类已满分。
+> 剩下的分数全在编排与作答层（P3），本 README 会随阶段推进更新。
 > 各阶段实际完成情况见文末《进度》一节；
 > 接手项目里原有 RAG 服务的缺陷分析与基线得分见 [`DEBUG_LOG.md`](DEBUG_LOG.md) 与 [`EVAL_REPORT.md`](EVAL_REPORT.md)。
 
@@ -175,12 +176,13 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 |---|---|---|
 | HTTP | `kbqa/server.py` | 保留外壳，6 个契约接口都在 |
 | **数据** | **`kbqa/core/normalize.py`、`cleaning.py`、`metrics.py`、`datatools.py`** | **✅ P1 已重写**（六规则清洗 / v3+v2 口径引擎 / 只读数据工具） |
+| **检索** | **`kbqa/core/textnorm.py`、`loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`** | **✅ P2 已重写**（四后缀加载 / GBK 降级 / HTML 剥标签 / 标题感知切块 / jieba / 内容哈希缓存键 / 先滤后取） |
 | 编排 | `kbqa/service.py`、`planner.py`、`answerer.py`、`live.py` | 待 P3 重写编排与安全闸 |
-| 检索 | `kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py` | 待 P2 重写 |
-| 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`aliases.py`、`sanitize.py` | starter 里这些比预期完整，P2/P3 移植复用 |
+| 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`sanitize.py` | starter 里这些比预期完整，P3 移植复用 |
 | 模型 | `kbqa/llm.py`、`toolspec.py` | 待 P3 按契约 §7 复核；接入说明见 [`LLM_SETUP.md`](LLM_SETUP.md) |
-| 基建 | `scripts/baseline_report.py`、`tests/` | **P0 已建**；P1 起 `tests/defects/` 做缺陷复现、`tests/test_metrics.py` 做口径回归 |
-| ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`ace8d9a`），被 `kbqa/core/` 取代 |
+| 基建 | `scripts/baseline_report.py`、`tests/` | P0 建；P1/P2 用 `tests/defects/` 做缺陷复现，`tests/test_metrics.py` / `test_api_metrics.py` 做回归 |
+| ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`ace8d9a`） |
+| ~~旧模块~~ | ~~`kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`、`sanitize.py`~~ | **已删除**（P2 `f4ae7b0`），被 `kbqa/core/` 取代 |
 
 ### 选型理由
 
@@ -325,11 +327,36 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 | 阶段 | 交付 | 状态 |
 |---|---|---|
 | **P0** | 环境可复现 + 基线测绘 + 过程文件骨架 | ✅ **完成**（基线 17.00/100） |
-| **P1** | 清洗层 + 口径引擎 + metrics API（第一关 12 分） | ✅ **完成**（42.50/100，`metrics` 与 `data` 满分） |
-| P2 | 混合检索层 + starter 缺陷修复留证（第二关 20 分） | ⏳ 下一步 |
-| P3 | 问答编排 + LLM 接入 + preflight（第三关 22 分） | ⏳ |
+| **P1** | 清洗层 + 口径引擎 + metrics API（第一关 12 分） | ✅ **完成**（42.50/100，`metrics`/`data` 满分） |
+| **P2** | 混合检索层 + starter 缺陷修复留证（第二关 20 分） | ✅ **完成**（53.00/100，`retrieval` 15/15、`health` 满分） |
+| P3 | 问答编排 + LLM 接入 + preflight（第三关 22 分） | ⏳ 下一步 |
 | P4 | 前端看板 + 对话栏 + 调试面板（第四关 8 分） | ⏳ |
 | P5 | 收尾验收 + 换库自验 | ⏳ |
+
+### P2 出口检查单
+
+- [x] `retrieval` 15 题**全部命中金标**（含 R03 GBK 通知、R04 英文邮件、R05 HTML）
+- [x] `DEBUG_LOG.md` 累计 **13 条闭环**（P1 四条 + P2 九条，达标 ≥12）
+- [x] `kb_docs=35`、`kb_chunks=113`（starter 是 32 / 53）
+- [x] 缓存随知识库内容失效（内容哈希进缓存键）；P0 那 2 条跨两阶段的红测试转绿
+- [x] `EVAL_REPORT.md` §2 记录本阶段得分 + 分类对比表 + commit
+- [x] 换库冒烟：`content_key` 随文件增删改变化，`load_index` 端到端重建
+- [x] `pytest tests` → **159 passed**
+
+### P2 已知限制（不藏）
+
+1. **没有做向量检索。** 契约 §7.6 说可选，而实测 BM25 + jieba + 别名归一
+   已经拿到 `retrieval` 15/15。引入 `sentence-transformers` 意味着评审环境要下载
+   ~470 MB 模型 + 装 torch，为了 0 分的边际收益增加一个"干净环境跑不起来"的风险，
+   我判断不值得。**这是我们自己文档限制范围内的决定**，P5 若有余量再评估。
+2. **`doc` / `version` / `multi_turn` / `safety` 仍然低**，但**原因已经不在检索层**——
+   失分检查是 `answer_type_in` / `cite_all` / `fact_all`，不是 `gold_all`。
+   证据：T02 第 1 轮检索命中了 KB-021，回答却是 `refusal` "知识库里没有找到"。
+   这条证据是 P3 的优先级依据，写在 `EVAL_REPORT.md` §2。
+3. **EMBEDDING / 向量索引的接口没有预留**。若 P5 要加，`core/retriever.py`
+   的打分入口是单一函数，接 RRF 融合不需要动其他层。
+4. **jieba 首次加载约 0.45 秒**，已放在启动期预热（rebuild 与 `Service()`），
+   但它进了 `requirements.txt`——评审装依赖时多一个包（约 5 MB，无下载）。
 
 ### P1 出口检查单
 
@@ -399,3 +426,12 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 | v2 回填 `qty × unit_price` | `core/cleaning.py::backfill_cents` |
 | 只读连接（`mode=ro`） | `core/metrics.py::open_readonly` |
 | 差额 = 舍入后指标之差 | `core/datatools.py::compare_periods` |
+| 可见正文管线（与评测同构） | `core/textnorm.py`（`decode_bytes` / `html_to_text` / `normalize_doc`） |
+| 四后缀加载 + 元数据降级链 | `core/loader.py::load_knowledge_base` |
+| 标题感知切块 / 覆盖不变式 | `core/chunker.py::chunk_document` |
+| jieba 分词 + 别名挂词典 | `core/tokenizer.py::init_jieba`、`core/index.py::_prepare_tokenizer` |
+| 缓存键含知识库内容哈希 | `core/index.py::content_key` |
+| 先过滤后截取 top_k | `core/retriever.py::_allowed` + `search` |
+| 文档注入剥离（quote 仍用原文） | `core/retriever.py::Hit.dropped_instructions`、`core/sanitize.py` |
+| 通知优先于总表 | `core/retriever.py::_multiplier`（`NOTICE_BOOST` / `REFERENCE_PENALTY`） |
+| 跨语言别名桥接 | `core/aliases.py::_partial_match`、`distinctive_tokens` |

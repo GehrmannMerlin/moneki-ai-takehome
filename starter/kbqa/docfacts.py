@@ -6,7 +6,7 @@ import re
 from typing import Optional
 
 from .entities import focus_kinds
-from .tokenizer import STOP_CHARS, content_tokens, tokenize
+from .core.tokenizer import STOP_CHARS, content_tokens, tokenize
 from .units import MAX_QUOTE, Unit, UnitIndex
 
 MARKERS = {"✓", "✔", "√", "有", "×", "✗", "—", "-", "无", "N/A"}

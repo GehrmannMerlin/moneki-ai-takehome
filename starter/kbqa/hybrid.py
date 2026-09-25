@@ -8,9 +8,9 @@ from typing import Optional
 
 from . import render
 from .planner import Plan
-from .retriever import Hit, SearchResult
+from .core.retriever import Hit, SearchResult
 from .schemas import Answer
-from .tokenizer import normalise
+from .core.tokenizer import normalise
 
 _TARGET = re.compile(r"目标[^。；\n]{0,12}?(\d[\d,]*(?:\.\d+)?)\s*(份|杯|单|件|元|%)")
 _PRICE = re.compile(r"(?:调整为|调为|现价|活动价|售价为|售价|价格为)\s*[¥￥]?\s*(\d+(?:\.\d+)?)")

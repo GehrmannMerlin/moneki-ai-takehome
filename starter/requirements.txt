@@ -2,3 +2,5 @@ fastapi
 uvicorn
 httpx
 pytest
+# P2 检索层：中文分词。词典约 5 MB，随包安装，无需额外下载。
+jieba

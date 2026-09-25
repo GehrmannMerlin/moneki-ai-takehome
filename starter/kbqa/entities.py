@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .aliases import AliasTable
-from .tokenizer import normalise
+from .core.aliases import AliasTable
+from .core.tokenizer import normalise
 
 #: 指标的说法 -> 指标字段。这是语言词表，不是答案。
 METRIC_WORDS: list[tuple[str, tuple[str, ...]]] = [

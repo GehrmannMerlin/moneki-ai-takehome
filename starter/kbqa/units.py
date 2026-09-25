@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .sanitize import split_sentences
-from .tokenizer import tokenize
+from .core.sanitize import split_sentences
+from .core.tokenizer import tokenize
 
 #: 契约 §5：一条 quote 不超过 400 个字符。
 MAX_QUOTE = 400

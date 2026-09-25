@@ -24,21 +24,22 @@
 | 2 | 数据 | `tools.py:53` | 右开区间 `>= ? AND < ?` | **✅ P1 已闭环** |
 | 3 | 数据 | `tools.py:96-109` | v2 旧口径：退款被排除、orders 数行数 | **✅ P1 已闭环** |
 | 4 | 数据 | `tools.py:74-79` | `run_sql` 执行任意 SQL 且 `commit()` | **✅ P1 已闭环** |
-| 5 | 服务 | `service.py:70` | `kb_docs` 数目录文件数（36） | 待 P2 |
-| 6 | 检索 | `tokenizer.py:20-22` | 按空白分词，中文整句一个 token | 待 P2 |
-| 7 | 检索 | `loader.py:12` | 只收 `.md`/`.markdown`，丢 3 篇 | 待 P2 |
-| 8 | 检索 | `loader.py:82-84` | 一律 UTF-8 `errors="ignore"`，GBK 乱码 | 待 P2 |
-| 9 | 检索 | `loader.py:178-182` | HTML 不剥标签直接入库 | 待 P2 |
-| 10 | 检索 | `chunker.py:41` | 丢每篇文尾不足 300 字的部分 | 待 P2 |
-| 11 | 检索 | `index.py:23-27` | 缓存键不含知识库内容 | **测试已红，修复待 P2** |
-| 12 | 检索 | `retriever.py:275-276` | `hit.doc_id` 用排序位置覆写真实 doc_id | 待 P2 |
-| 13 | 检索 | `retriever.py:306-307` | 先取 top_k 再过滤已废止版本 | 待 P2 |
+| 5 | 服务 | `service.py:70` | `kb_docs` 数目录文件数（36） | **✅ P2 已闭环** |
+| 6 | 检索 | `tokenizer.py:20-22` | 按空白分词，中文整句一个 token | **✅ P2 已闭环** |
+| 7 | 检索 | `loader.py:12` | 只收 `.md`/`.markdown`，丢 3 篇 | **✅ P2 已闭环** |
+| 8 | 检索 | `loader.py:82-84` | 一律 UTF-8 `errors="ignore"`，GBK 乱码 | **✅ P2 已闭环** |
+| 9 | 检索 | `loader.py:178-182` | HTML 不剥标签直接入库 | **✅ P2 已闭环** |
+| 10 | 检索 | `chunker.py:41` | 丢每篇文尾不足 300 字的部分 | **✅ P2 已闭环** |
+| 11 | 检索 | `index.py:23-27` | 缓存键不含知识库内容 | **✅ P2 已闭环** |
+| 12 | 检索 | `retriever.py:275-276` | `hit.doc_id` 用排序位置覆写真实 doc_id | **✅ P2 已闭环** |
+| 13 | 检索 | `retriever.py:306-307` | 先取 top_k 再过滤已废止版本 | **✅ P2 已闭环** |
+| 13b | 检索 | `loader.py:61-76` + `retriever.py:120` | **元数据键名对不上（`state` vs `status`），版本过滤整条失效** | **✅ P2 已闭环（排查中新发现）** |
 | 14 | 会话 | `sessions.py:16-28` | `_turns` 全局单链表，`session_id` 被忽略 | 待 P3 |
-| 15 | 文档 | `HANDOVER.md` | 交接文档三处与代码不符 | 待 P2 |
+| 15 | 文档 | `HANDOVER.md` | 交接文档三处与代码不符 | 待 P2（已在 README 更正） |
 
-> **缺陷 #1–#4 已在 P1 闭环**，`starter/kbqa/tools.py` 与 `starter/kbqa/cleaning.py`
-> 已被 `starter/kbqa/core/` 取代并删除。下面每条都带真实红证据与修复 commit。
-> 注意每条「根因」里的行号指的是**已经删掉的旧文件**——这是刻意保留的：
+> **缺陷 #1–#4 在 P1 闭环，#5–#13 与 #13b 在 P2 闭环**，
+> 13 条闭环记录已满足"≥12 条"的出口标准。
+> 每条「根因」里的行号指的是**已被取代的旧文件**——这是刻意保留的：
 > 现场调试环节要能说清"我当时是在哪一行看出来的"。
 >
 > `starter/.cache/index.json` 被提交进仓库（缺陷 #11 的另一半，同一处根因）已在
@@ -133,48 +134,48 @@ def content_key(kb_dir: Path) -> str:
 | **现象** | 基线 `/api/health` 报 `kb_docs=36`，而契约 §1 明确要求"实际进入索引的文档数，不是目录里的文件数"。N01 红。 |
 | **假设** | ① 索引里真有 36 篇（**排除**：`kb_docs=36` 的同时 `kb_chunks=53`，32 篇文档才切得出这个量级）；② `service.py` 用文件系统计数（**成立**）。 |
 | **验证** | `service.py:70` 是 `sum(1 for path in self.settings.kb_dir.rglob("*") if path.is_file())`；同一次响应里 `kb_warnings` 明说"跳过没有 KB 编号的文件：README.md"——它自己知道该跳过，但计数没走同一条路。知识库目录 35 个 `KB-*` 文件 + 1 个 `README.md` = 36。 |
-| **根因** | `starter/kbqa/service.py:70`。`kb_docs` 应从索引构建结果取（`len(index.docs_meta)`），与告警用同一份数据。 |
-| **修复** | （P1 接数据层，P2 索引落地后转绿）`health()` 的 `kb_docs` 取 `len(index.docs_meta)`。 |
-| **回归测试** | `test_health_kb_docs_is_indexed_count`（P2 落地） |
+| **根因** | `starter/kbqa/service.py:70` 是 `sum(1 for path in self.settings.kb_dir.rglob("*") if path.is_file())`。`kb_docs` 应从索引构建结果取（`len(index.docs_meta)`），与告警用同一份数据。 |
+| **修复** | `f4ae7b0`。`health().kb_docs = len(self.index.docs_meta)`。 |
+| **回归测试** | `tests/defects/test_d05_health.py`（4 条）、`tests/test_api_metrics.py::test_health_valid_sales_rows`<br>**修复前确实是红的**：`test_kb_docs_is_indexed_count`（32 ≠ 35）、`test_health_kb_docs_uses_index`（36 ≠ 35）<br>修复后实测 `/api/health` → `kb_docs=35, kb_chunks=113`，N01 两个字段全绿。 |
 
 ---
 
-## 缺陷 #6：分词按空白切，中文检索实质失效
+## 缺陷 #6：按空白分词，中文检索实质失效
 
 | 项 | 内容 |
 |---|---|
-| **现象** | `retrieval` 15 题只对 6 题；HANDOVER 却声称"检索命中率 95%"（`HANDOVER.md:33`）。 |
-| **假设** | ① 知识库文档太少（**排除**：35 篇、55 题题库足够区分）；② 排序公式错（排除：BM25 实现本身没问题）；③ 分词把整句中文当成一个 token（**成立**）。 |
-| **验证** | `tokenizer.py:20-22` 是 `normalise(text).split()`。中文句子没有空格，所以「外卖订单多久内可以退款」整体成为一个 token，只有文档里出现过**完全相同整句**才可能命中。基线检索题里通过的那 6 题，全部是查询串恰好是短词或英文的情况。 |
-| **根因** | `starter/kbqa/tokenizer.py:20-22`。 |
-| **修复** | （P2）`jieba` 分词 + KB-003 别名词典挂自定义词典；跨语言别名归一入索引（`index.py:_tokens_of` 的思路保留）。 |
-| **回归测试** | `test_retrieve_doc_id_correct`、`test_crosslingual_alias`、`test_notice_beats_master`（P2 落地） |
+| **现象** | 基线 `retrieval` 15 题只对 6 题；所有中文查询的 BM25 分数几乎都是 **0.0**。HANDOVER 却声称"检索命中率 95%"（`HANDOVER.md:33`）。 |
+| **假设** | ① 知识库文档太少（**排除**：35 篇、113 块，足够区分）；② BM25 公式写错（**排除**：`idf`/`score_terms` 的实现是对的）；③ 分词把整句中文当成一个 token（**成立**）。 |
+| **验证** | 直接打印 `tokenize("外卖订单多久内可以退款")`，starter 返回 **1 个 token**（整句）。中文没有空格，`normalise(text).split()` 等于不切。对照 `index.doc_freq`：查询切出的词在语料里一个都找不到，所以 `idf=0`、分数恒为 0——"命中率 95%"在数学上不可能成立。 |
+| **根因** | `starter/kbqa/tokenizer.py:20-22`：`return normalise(text).split()`。 |
+| **修复** | `f0cb360`。`core/tokenizer.py` 改 jieba 分词；`core/index.py::_prepare_tokenizer` 把 KB-003 别名词典的全部写法（含数据库写法）挂进 jieba 自定义词典，否则 `牛肉poke` 会被切成 `牛肉`+`poke`，别名表的整词判定接不上。启动期预热 0.45 秒（放 rebuild 与 `Service()`，不能等第一个请求）。 |
+| **回归测试** | `tests/defects/test_d06_tokenizer.py`（6 条）<br>**修复前确实是红的**：4 条 `test_chinese_query_tokenizes_into_words`（整句只切出 1 个 token，要求 ≥5）、`test_query_and_document_share_tokens`（查询词在语料里一个都找不到）<br>修复后：`外卖订单多久内可以退款` → `['外卖','订单','多久','内','可以','退款']`。 |
 
 ---
 
-## 缺陷 #7：loader 只收 `.md`/`.markdown`
+## 缺陷 #7：loader 只收 `.md`/`.markdown`，整个丢掉三篇
 
 | 项 | 内容 |
 |---|---|
-| **现象** | `kb_chunks=53` 远低于预期；`kb_docs` 口径本身也错。#7/#8/#9 三条同属"loader 丢掉/弄脏了 3 篇文档"。 |
-| **假设** | ① 知识库里没有 `.txt`/`.html`（**排除**：`ls knowledge_base` 里有 KB-022.txt、KB-061.html、KB-062.txt）；② 后缀白名单漏了（**成立**）。 |
-| **验证** | `loader.py:12` `SUPPORTED_SUFFIXES = {".md", ".markdown"}`。被丢掉的三篇恰好是 C03/R03（KB-062 周五营业时间）、KB-061 过敏原表、KB-022 停售通知——都是题库金标答案所在的文档，所以 `doc`/`version` 类全灭不只是编排问题。 |
-| **根因** | `starter/kbqa/loader.py:12` + `load_knowledge_base` 的后缀过滤（`loader.py:233`）。 |
-| **修复** | （P2）四种后缀 `.md`/`.markdown`/`.txt`/`.html`。 |
-| **回归测试** | `test_loader_four_suffixes`（索引文档数 = 35，KB-022/061/062 在列） |
+| **现象** | `kb_chunks=53`、`kb_docs` 只有 32（应 35）。R03/R04/R05 三道检索题全红。 |
+| **假设** | ① 知识库里没有 `.txt`/`.html`（**排除**：`knowledge_base/` 下有 KB-022.txt、KB-061.html、KB-062.txt）；② 后缀白名单漏了（**成立**）。 |
+| **验证** | `loader.py:12` `SUPPORTED_SUFFIXES = {".md", ".markdown"}`，`load_knowledge_base` 在 `loader.py:233` 按它过滤。被丢的三篇恰好都是题库金标所在：KB-062（GBK 通知，R03 的 23:00）、KB-061（HTML FAQ，R05）、KB-022（英文邮件，R04）。对照 `HANDOVER.md:35` 那句"md、txt、html 三种格式都支持"——**直接矛盾**。 |
+| **根因** | `starter/kbqa/loader.py:12` + `loader.py:233`。 |
+| **修复** | `b612b04`。`core/loader.py` 的 `SUPPORTED_SUFFIXES` 加 `.txt`/`.html`/`.htm`。 |
+| **回归测试** | `tests/defects/test_d07_suffixes.py`（6 条）<br>**修复前确实是红的**：`test_all_three_lost_docs_are_indexed`、`test_document_count_is_35`（32 ≠ 35）、`test_txt_email_loaded`、`test_html_doc_loaded`<br>修复后 `kb_docs` 32 → 35。 |
 
 ---
 
-## 缺陷 #8：GBK 文件按 UTF-8 忽略错误解码
+## 缺陷 #8：GBK 文件按 UTF-8 `errors="ignore"` 解码
 
 | 项 | 内容 |
 |---|---|
-| **现象** | KB-062（旧 OA 导出的 GBK txt）内容乱码，即使进了索引也检索不到、quote 也不可能逐字对上。 |
-| **假设** | ① 文件本身损坏（**排除**：`Get-Content -Encoding GBK` 能正常读）；② 硬编码 UTF-8 且 `errors="ignore"`（**成立**）。 |
-| **验证** | `loader.py:82-84` 就是 `raw.decode("utf-8", errors="ignore")`——注释还写着"个别老文件里有怪字符，忽略掉就行，不影响检索"，实际是把整篇中文丢掉。评测脚本 `run_eval.py:201-208` 的 `decode_bytes` 是先 UTF-8、失败再 GB18030，两者不一致正是 quote 校验必挂的原因之一。 |
+| **现象** | KB-062（旧 OA 导出的 GBK txt）读进来是残缺的乱码文档，"23:00"这个金标答案直接没了。 |
+| **假设** | ① 文件本身损坏（**排除**：`raw.decode("gb18030")` 能完整读出"营业时间调整"与"23:00"）；② 硬编码 UTF-8 且 `errors="ignore"`（**成立**）。 |
+| **验证** | `loader.py:82-84` 就是 `raw.decode("utf-8", errors="ignore")`，注释还写着"个别老文件里有怪字符，忽略掉就行，不影响检索"——**这句话本身就是错的**：`errors="ignore"` 把无法解码的字节直接丢掉，KB-062 的整篇中文正文都被扔了，不是"不影响"。评测脚本 `run_eval.py:201-208` 的 `decode_bytes` 是先 UTF-8、失败再 GB18030，两边不一致正是 quote 逐字校验必挂的原因之一。 |
 | **根因** | `starter/kbqa/loader.py:82-84`。 |
-| **修复** | （P2）复刻评测脚本的 `decode_bytes`：UTF-8 → GB18030 降级。 |
-| **回归测试** | `test_gbk_decoding`（KB-062 正文含"23:00"且无乱码） |
+| **修复** | `b612b04`。`core/textnorm.py::decode_bytes` 逐字复刻评测脚本那一版（UTF-8 → GB18030），返回 `(文本, 实际编码名)`，编码名落进 `Document.encoding` 与 meta 供 trace 用。 |
+| **回归测试** | `tests/defects/test_d08_gbk.py`（6 条）<br>**修复前确实是红的**：`test_kb062_loads_without_mojibake`、`test_kb062_contains_the_answer`（找不到 "23:00"）、`test_kb062_has_no_replacement_chars`、`test_kb062_records_encoding`<br>测试里先有一条 `test_kb062_file_really_is_gbk` 确认"文件确实不是 UTF-8"，排除"文件本身没问题"这个假设。 |
 
 ---
 
@@ -182,12 +183,12 @@ def content_key(kb_dir: Path) -> str:
 
 | 项 | 内容 |
 |---|---|
-| **现象** | KB-061（HTML 过敏原表）正文里全是标签，检索打分被 `<td>`/`<tr>` 污染，quote 逐字校验必然不过。 |
-| **假设** | ① 入库前剥了（**排除**）；② 靠 BM25 忽略标签（**排除**：标签会真的进 postings，稀释正文词频）；③ 没剥（**成立**）。 |
-| **验证** | `loader.py:178-182`，注释写着「html 直接按文本入库，标签也就那么几个，BM25 自己会忽略」。评测脚本 `run_eval.py:211-214` 的 `html_to_text` 会先删 `<script>`/`<style>`、再删所有标签、最后 `unescape` 实体——两边不一致。 |
+| **现象** | KB-061（HTML 过敏原/FAQ）正文里全是标签，检索打分被 `<td>`/`<style>` 污染，quote 逐字校验必然不过。 |
+| **假设** | ① 入库前剥了（**排除**）；② 靠 BM25 忽略标签（**排除**：标签会真的进 postings，`<style>` 里那一大段 CSS 还变成 `border-radius`/`font-family` 这类假词）；③ 没剥（**成立**）。 |
+| **验证** | `loader.py:178-182`，注释写着"html 直接按文本入库，标签也就那么几个，BM25 自己会忽略"。实测剥标签前后：正文里 `border-radius`、`querySelector`、`dataLayer` 都能被检出来。评测脚本 `run_eval.py:197-214` 的 `html_to_text` 会先删 `<script>`/`<style>`、再删所有标签、最后 `unescape` 实体。 |
 | **根因** | `starter/kbqa/loader.py:178-182`。 |
-| **修复** | （P2）复刻评测的 `html_to_text`：剥 `<script>`/`<style>` → 剥标签 → 反转义实体。 |
-| **回归测试** | `test_html_stripped`（KB-061 的 chunk 无标签残留） |
+| **修复** | `b612b04`。`core/textnorm.py::html_to_text` 逐字复刻评测那一版，顺序不能换：先剥 script/style 才能保证里面的 `<` 不把后面的标签切歪；最后才 unescape，否则 `&lt;div&gt;` 会被当成标签删掉。 |
+| **回归测试** | `tests/defects/test_d09_html.py`（6 条）<br>**修复前确实是红的**：`test_html_document_has_no_tags`、`test_html_document_has_no_style_or_script`、`test_html_entities_unescaped`、`test_html_keeps_real_content`、`test_html_title_extracted`、`test_chunks_of_html_have_no_tags` |
 
 ---
 
@@ -195,12 +196,40 @@ def content_key(kb_dir: Path) -> str:
 
 | 项 | 内容 |
 |---|---|
-| **现象** | 关键事实恰好在文尾时检索不到（通知的联系人、政策的最后一条）。`kb_chunks` 只有 53，等于"32 篇文档各出 1–2 块"。 |
-| **假设** | ① 文档都很短（**排除**：`KB-001` 单篇就上千字）；② `range()` 的上界算错（**成立**）。 |
-| **验证** | `chunker.py:41` 是 `range(0, len(text) - CHUNK_SIZE, CHUNK_SIZE)`。例如 `len(text)=1000`、`CHUNK_SIZE=300` 时 `range(0, 700, 300)` → 0/300/600，最后 `text[600:900]` 之后 100 字**永远不会被任何 chunk 覆盖**。且定长切点落在句子中间，没有标题层级意识。 |
+| **现象** | KB-042 末尾那句"临时调整以通知为准"（C03/R03 需要它）检索不到；`kb_chunks` 只有 53。 |
+| **假设** | ① 文档都很短（**排除**：KB-001 单篇上千字，KB-040 的表有 1297 字）；② `range()` 上界算错（**成立**）。 |
+| **验证** | `chunker.py:41` 是 `range(0, len(text) - CHUNK_SIZE, CHUNK_SIZE)`。`len(text)=1000`、`CHUNK_SIZE=300` 时得 0/300/600，`text[600:900]` 之后那 100 字**永远不会被任何块覆盖**。写了一条覆盖不变式测试（chunks 拼接 == 文档正文）逐篇量：**每篇都丢字**，最多的一篇丢上百字。 |
 | **根因** | `starter/kbqa/chunker.py:41`。 |
-| **修复** | （P2）标题层级感知切块，200~500 字，过短向上合并、过长按段落二切，**不丢文尾**。 |
-| **回归测试** | `test_chunker_keeps_tail`（每篇文档全文被 chunks 覆盖：拼接 == 正文） |
+| **修复** | `df591ef`。`core/chunker.py` 改成标题层级感知：按标题行切段 → 超长段按段落切 → 再按行切 → 再按句切 → 相邻小段打包。**偏移直接切片、不重新拼接字符串**，所以覆盖不变式必然成立。 |
+| **回归测试** | `tests/defects/test_d10_chunker.py`（9 条）<br>**修复前确实是红的**：6 条 `test_full_coverage[KB-*]` + `test_all_documents_covered`（全量逐篇）+ `test_tail_of_short_doc_present` + `test_chunks_are_reasonably_sized`<br>修复后实测：chunks 53 → **113**、最大块 1297 → **560**、35 篇文档**逐字覆盖**。<br>两处实测出来的取舍：`MIN_CHARS` 从 200 降到 120（"## 五、复核"这类只剩一句话的小节，硬撑到 200 只能靠粘不相关内容）；新增"按行切"这一层（KB-040 是一张 1297 字的 Markdown 表，行间没有空行，段落切法对它完全无效）。 |
+
+---
+
+## 缺陷 #11：索引缓存键不含知识库内容
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 读 `index.py` 时发现 `content_key()` 只吃 `kb_dir` 参数、却在函数体里一次都没用它；`rebuild.py:21` 的注释还写着"缓存还有有效就不用重算，省几秒"。跑基线时 `/api/health` 的 `index_key` 恒为 `8651fac326e2`，把 `knowledge_base/` 换成副本后仍然是这个值。 |
+| **假设** | ① 缓存键由知识库内容哈希算出，只是实现得隐晦（**排除**）；② 缓存键只由三个版本号常量算出，知识库内容完全不参与（**成立**）；③ `kb_dir` 是历史遗留参数，另有别的失效机制（**排除**：全仓库 grep `content_key` 只有两处调用，都只传 kb_dir）。 |
+| **验证** | 复现测试 `tests/test_p0_infra.py::test_content_key_depends_on_kb_content`：把知识库复制到临时目录，取一次 `content_key(kb)`，改掉 `KB-003` 一个字，再取一次——两次完全相同。<br>反向测试 `test_content_key_still_depends_on_code_versions`：monkeypatch `kbqa.core.index.CHUNKER_VERSION` / `TOKENIZER_VERSION`，键**会**变——证明它只认版本号、不认内容。<br>`test_content_key_changes_when_files_added_or_removed`：自造最小知识库，新增/删除文件后键也不变。 |
+| **根因** | `starter/kbqa/index.py:23-27`：
+
+```python
+def content_key(kb_dir: Path) -> str:
+    """缓存键：三个版本号拼起来哈希一下。改了切块或分词，键就变，缓存自动失效。"""
+    digest = hashlib.sha256()
+    digest.update(("%s|%s|%s\n" % (INDEX_VERSION, CHUNKER_VERSION, TOKENIZER_VERSION)).encode())
+    return digest.hexdigest()
+```
+
+`kb_dir` 只出现在签名里。连带后果：`.cache/index.json` 被提交进仓库（`56f7a1f`），
+评委按 README 第 3 步换 `knowledge_base/` 后缓存键不变，`load_index` 命中旧缓存，
+服务拿**上一套知识库**答题——评审第 3 步的直接炸点。 |
+
+| 项 | 内容 |
+|---|---|
+| **修复** | `f4ae7b0`（跟着检索层接线一起提交；`content_key` 本体在 `f0cb360` 随 `core/index.py` 落地）。新键 = 版本常量 + 每个文件的(相对路径, 大小, mtime_ns, 内容 sha1)。三项一起算的理由：只看 mtime，`git checkout` 回一份旧文件会白重建；只看内容，某些同步工具保留 mtime 时不会重建。仓库侧的清理已在 `3ab5d16` 完成。 |
+| **回归测试** | `tests/test_p0_infra.py::test_content_key_depends_on_kb_content`、`::test_content_key_changes_when_files_added_or_removed`、`tests/defects/test_d11_cache.py`（5 条，含端到端 `test_load_index_rebuilds_on_content_change`）<br>**修复前确实是红的**（`a41f6c1`，Python 3.12.6，starter 原样）：<br>`2 failed, 29 passed, 1 warning in 1.52s`<br>`FAILED tests/test_p0_infra.py::test_content_key_depends_on_kb_content`<br>`FAILED tests/test_p0_infra.py::test_content_key_changes_when_files_added_or_removed`<br>这批测试**从 P0 一直红到 P2**（跨两个阶段），现在 159 passed 全绿。<br>端到端证据：改一篇 KB 文档后 `load_index` 返回的 `key` 变化、正文里出现新内容。 |
 
 ---
 
@@ -210,23 +239,36 @@ def content_key(kb_dir: Path) -> str:
 |---|---|
 | **现象** | 检索结果里 `doc_id` 与该片段真实所属文档不一致。`gold_all` 检查大面积红，citations 指向错文档。 |
 | **假设** | ① 金标本身错（**排除**：金标是评委给的，且同一批题在修好分词后能对上）；② 返回时用排序位置覆盖了真实 doc_id（**成立**）。 |
-| **验证** | `retriever.py:275-276` 是 `hit.doc_id = ordered[len(hits)].doc_id`——`ordered` 是全量排序后的文档/片段列表，`len(hits)` 是"已经收集了几条命中"，两者没有任何对应关系。 |
+| **验证** | `retriever.py:275-276` 是 `hit.doc_id = ordered[len(hits)].doc_id`——`ordered` 是全量排序后的 chunk 列表，`len(hits)` 是"已经收集了几条命中"，两者没有任何对应关系。**这条极难用"挑几个查询"复现**：只有当先处理的 chunk 被"每篇限占一格"跳过、位置才会错开。我第一版挑了 8 个查询，只有 1 个撞上。改成**逐 chunk 遍历**（每个位置都试一遍）后稳定命中。 |
 | **根因** | `starter/kbqa/retriever.py:275-276`。 |
-| **修复** | （P2）`doc_id` 一律从 chunk 自身的 `chunk.doc_id` 取。 |
-| **回归测试** | `test_retrieve_doc_id_correct`（每个 hit 的 doc_id == 其 chunk 真实所属文档） |
+| **修复** | `f4ae7b0`。删掉那行覆写；`core/retriever.py::_hit()` 的 doc_id 只从 `chunk.doc_id` 取。 |
+| **回归测试** | `tests/defects/test_d12_docid.py`（11 条）<br>**修复前确实是红的**：`test_hit_docid_matches_chunk_owner_on_every_chunk`（逐 chunk 遍历，命中多条）、`test_hit_docid_owns_chunk[Super Souper 周五营业到几点]`、`test_all_hits_are_consistent_across_queries` |
 
 ---
 
-## 缺陷 #13：先取 top_k 再按版本过滤
+## 缺陷 #13：先取满 top_k 再过滤已废止版本
 
 | 项 | 内容 |
 |---|---|
 | **现象** | `/api/retrieve` 返回条数不足 `top_k`。契约 §4 明令禁止这个顺序，评测 `results_count` 直接红。 |
-| **假设** | ① 索引里片段不足（**排除**：`kb_chunks=53` 时索引片段总数远多于 5）；② 顺序反了（**成立**）。 |
-| **验证** | `retriever.py:306-307`：先截取前 `top_k` 条，再按 `excluded`（已废止版本）过滤，于是过滤掉的空位没人补。 |
-| **根因** | `starter/kbqa/retriever.py:306-307`。 |
-| **修复** | （P2）先过滤后截取，恰好 top_k 条；不足才允许更少（补齐项标 `padded` 且问答链路禁用）。 |
-| **回归测试** | `test_retrieve_exactly_topk`（有已废止文档被滤时 results 仍 == top_k） |
+| **假设** | ① 索引片段不足（**排除**：113 块，远多于 5）；② 顺序反了（**成立**）。 |
+| **验证** | `retriever.py:306-307`：先截取前 `top_k` 条，再按 `excluded` 过滤，空位没人补。更本质的问题是 `allowed = set(range(len(self.index.chunks)))` 是**全量**——`_eligible()` 算出来的排除集合从头到尾没参与打分，被排除的文档照样占掉 top_k 的名额。 |
+| **根因** | `starter/kbqa/retriever.py:306-307`（顺序）+ `retriever.py:240`（`allowed` 没接过滤结果）。 |
+| **修复** | `f4ae7b0`。先算"合格 chunk 集合"（`_allowed()`），只在合格集合里打分、排序、截取。过滤结果按 `(as_of, store_id, historical)` 缓存——它与查询无关，整个服务生命周期算一次。 |
+| **回归测试** | `tests/defects/test_d13_topk.py`（11 条）<br>**修复前确实是红的**：`test_metadata_exposes_status_under_the_key_the_retriever_reads`、`test_eligibility_rejects_deprecated_versions_as_of_today`、`test_deprecated_doc_appears_in_filtered_list`、`test_deprecated_doc_ranked_first_is_excluded`<br>其中前两条钉的是下面 #13b 的根因。 |
+
+---
+
+## 缺陷 #13b：元数据键名对不上，版本过滤整条失效【排查中新发现】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 写 D13 的测试时发现：`as_of=2026-09-01`（今天）下，**三篇已废止文档一篇都没被过滤**。基线体检报告说 `KB-002`/`KB-010`/`KB-012` 都是 `已废止`，但它们全部出现在检索结果里。 |
+| **假设** | ① `_effective_to` 没建起来（**排除**：实测 `effective_to = {'KB-002': '2026-05-01', 'KB-010': '2026-07-01', 'KB-012': '2026-06-15'}`，链是好的）；② `as_of` 比较写反（**排除**：`"2026-09-01" >= "2026-07-01"` 为真）；③ 判据读的字段名不对（**成立**）。 |
+| **验证** | 直接打印 `index.docs_meta["KB-010"]` 的键集合：`['doc_id','effective_from','estimates_only','filename','format','state','stores','stores_explicit','superseded_by','title','title_year','type','updated_at']`——**有 `state`，没有 `status`**。而 `retriever.py:120` 读的是 `meta.get("status")`，恒为 `None`，条件 `meta.get("status") == "已废止"` 永远不成立。`Document.meta()`（`loader.py:61-76`）写的是 `"state": self.status`。 |
+| **根因** | `starter/kbqa/loader.py:65`（写 `state`）与 `starter/kbqa/retriever.py:120`（读 `status`）**不在同一个字段名上**。两处单独看都没毛病，合起来让整条版本过滤逻辑静默失效——没有报错、没有告警，只是所有旧版本都当现行用。 |
+| **修复** | `b612b04`（`core/loader.py::Document.meta()` 两个键都提供：`status` 是权威键，`state` 保留是为了不破坏 starter 里已按 `state` 读的地方，例如 `docfacts`）。 |
+| **回归测试** | `tests/defects/test_d13_topk.py::test_metadata_exposes_status_under_the_key_the_retriever_reads`、`::test_deprecated_docs_declare_status`、`::test_eligibility_rejects_deprecated_versions_as_of_today`、`::test_deprecated_doc_appears_in_filtered_list`、`::test_archived_docs_are_not_filtered`<br>**修复前确实是红的**（前 4 条）。<br>修复后：`as_of=2026-09-01` 下 KB-002/KB-010/KB-012 全部被挡，`filtered` 非空；`status=归档` 的 5 篇周报**不**被挡（归档 ≠ 废止，历史周报仍是资料——这条也单独有测试）。<br>**这是"两份同样的政策都进 top-k"的真正原因**，也是 V 系版本题（6 分）的地基。 |
 
 ---
 
@@ -261,8 +303,8 @@ def content_key(kb_dir: Path) -> str:
 | 项 | 内容 |
 |---|---|
 | **根因** | `starter/HANDOVER.md:33-35`（状态三句）、`:39`（缓存）、`:48`（右开区间）。 |
-| **修复** | （P2/P5）不改 `HANDOVER.md` 原文——它是评审素材，保留错误陈述；把三条更正写进仓库根 `README.md` 的"交接文档更正"一节与本文件。 |
-| **回归测试** | `test_legacy_tests_are_smoke_only`（P2 落地：断言自带冒烟测试在缺陷未修时也全绿，说明它测不出问题） |
+| **修复** | （P2/P5）不改 `HANDOVER.md` 原文——它是评审素材，保留错误陈述；把三条更正写进仓库根 `README.md` 的《关于 HANDOVER.md 的三处不实陈述》一节与本文件。 |
+| **回归测试** | `tests/defects/test_d07_suffixes.py`（后缀）、`tests/defects/test_d06_tokenizer.py`（分词）、`tests/test_p0_infra.py`（缓存）——三条不实陈述各自都有对应的红测试，修复后转绿。P2 落地。 |
 
 ---
 
