@@ -193,8 +193,8 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 | 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`sanitize.py` | starter 里这些比预期完整，P3 移植复用 |
 | 模型 | `kbqa/llm.py`、`toolspec.py` | 待 P3 按契约 §7 复核；接入说明见 [`LLM_SETUP.md`](LLM_SETUP.md) |
 | 基建 | `scripts/baseline_report.py`、`tests/` | P0 建；P1/P2 用 `tests/defects/` 做缺陷复现，`tests/test_metrics.py` / `test_api_metrics.py` 做回归 |
-| ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`ace8d9a`） |
-| ~~旧模块~~ | ~~`kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`、`sanitize.py`~~ | **已删除**（P2 `f4ae7b0`），被 `kbqa/core/` 取代 |
+| ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`1ec0f56`） |
+| ~~旧模块~~ | ~~`kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`、`sanitize.py`~~ | **已删除**（P2 `fdd3774`），被 `kbqa/core/` 取代 |
 
 ### 选型理由
 
@@ -457,7 +457,7 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 
 - [x] 干净环境三步起服务，`/api/health` 200（已实测：`VAR_DIR` 指向干净目录重建 → 起服务 → 6 个接口全通）
 - [x] `eval/baseline_report.json` 入库，分类分解表贴进 `EVAL_REPORT.md` §0
-- [x] 缺陷 #11 的红测试确认是红的，输出存档（`2 failed, 29 passed`，commit `a41f6c1`）
+- [x] 缺陷 #11 的红测试确认是红的，输出存档（`2 failed, 29 passed`，commit `a786f3c`）
 - [x] `AI_USAGE.md` 已记 4 条真实记录
 - [x] 索引缓存从版本库删除 + `.gitignore` 补 `.cache/`、`var/`
 - [x] Makefile 平台兼容（Windows/POSIX 自动选 venv 路径，不再依赖 `uv`）

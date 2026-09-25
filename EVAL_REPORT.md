@@ -22,7 +22,7 @@ python eval/run_eval.py --base-url http://localhost:8000 --questions eval/public
 |---|---|
 | 得分 | **17.00 / 100.00（17.0%）**，11 题全绿 / 共 55 题 |
 | 运行命令 | `python eval/run_eval.py --base-url http://localhost:8000 --questions eval/public_questions.jsonl --out eval/_baseline_raw`<br>（等价：`cd starter && make baseline`） |
-| 代码 commit | `a41f6c1`（starter 业务代码与原始提交 `56f7a1f` 一致，未改一行） |
+| 代码 commit | `a786f3c`（starter 业务代码与原始提交 `56f7a1f` 一致，未改一行） |
 | 模型 | **无**（未配置任何 Key，`llm_mode=mock`） |
 | 是否配置 Key | 否 |
 | 服务 | `python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000`，Windows / Python 3.12.6 |
@@ -114,7 +114,7 @@ python eval/run_eval.py --base-url http://localhost:8000 --questions eval/public
 |---|---|
 | 得分 | **42.50 / 100.00（42.5%）**，25 题全绿 / 共 55 题（基线 17.00，11 题全绿） |
 | 运行命令 | `python eval/run_eval.py --base-url http://localhost:8000 --questions eval/public_questions.jsonl --out eval/_p1_raw` |
-| 代码 commit | `ace8d9a`（P1 三个 fix 提交的最后一个；本阶段从 `eb8b3e2` 起） |
+| 代码 commit | `1ec0f56`（P1 三个 fix 提交的最后一个；本阶段从 `2e1f97c` 起） |
 | 模型 | **无**（未配置任何 Key，`llm_mode=mock`） |
 | 是否配置 Key | 否 |
 | 原始报告 | `eval/_p1_raw/report.json`、`eval/_p1_raw/report.md` |
@@ -299,7 +299,7 @@ R10 在中期实测里从绿变红。原因不是 P2 的检索改动本身，而
 |---|---|
 | 得分 | **100.00 / 100.00（100.0%）**，**55 题全绿 / 共 55 题**（P2 50.00，34 题全绿） |
 | 运行命令 | `python eval/run_eval.py --base-url http://localhost:8000 --questions eval/public_questions.jsonl --out eval/_p3_final` |
-| 代码 commit | `181382b`（P3 五个提交的最后一个） |
+| 代码 commit | `33d21c6`（P3 五个提交的最后一个） |
 | 模型 | **无**（未配置任何 Key，`llm_mode=mock`） |
 | 是否配置 Key | **否** |
 | 原始报告 | `eval/_p3_final/report.json`、`eval/_p3_final/report.md`（连跑两次一致） |
@@ -403,7 +403,7 @@ KB-022 的 `doc_score` 最低（7.01，排第四），被挤到第三位、被 `
 |---|---|
 | 得分 | **100.00 / 100.00（100.0%）**，55 题全绿 / 共 55 题（与 P3 持平，P4 不动问答逻辑） |
 | 运行命令 | `cd starter && .venv/Scripts/python scripts/regression.py --skip-tests`（自带起服务+对比） |
-| 代码 commit | `3366889`（后端路由隔离）、`523578a`（前端 + dist）、`17d9068`（评测即回归） |
+| 代码 commit | `3acadde`（后端路由隔离）、`7034d5b`（前端 + dist）、`44224a7`（评测即回归） |
 | 模型 | **无**（未配置任何 Key，`llm_mode=mock`） |
 | 是否配置 Key | 否 |
 | 原始报告 | `eval/_regression_raw/report.json` |
