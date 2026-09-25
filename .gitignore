@@ -1,0 +1,21 @@
+# 运行期与本地产物，不入库
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 评测脚本跑出来的临时报告（eval/baseline_report.json 是有意入库的基线证据）
+eval/report.json
+eval/report.md
+eval/__pycache__/
+docs/_*.txt
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# AI 助手会话的本地记忆目录（不是项目产物）
+.workbuddy/
