@@ -1,12 +1,17 @@
-"""P1 缺陷复现测试的公共夹具。
+"""缺陷复现测试的公共夹具（P1 数据层 + P2 检索层）。
 
 这些测试断言的是**正确行为**，所以在新核心落地前它们必然失败——这正是
 DEBUG_LOG 里"修复前确实是红的"的证据。
 
-为什么要绕一圈"在临时目录建一份 clean.db"：
-starter 的 `kbqa.tools.DataTools` 本身**不是**错的，它错在 `_where()` 的右开区间
-与 `query_metrics()` 的 v2 口径。所以复现测试从"清洗表"这一层往下断言，
-不直接调 `Service`——否则清洗缺陷会一起混进来，定位不出是哪一层坏了。
+两条设计说明：
+
+* **P1（数据层）**：为什么要绕一圈"在临时目录建一份 clean.db"——
+  starter 的 `DataTools` 本身不是全错，它错在 `_where()` 的右开区间与
+  `query_metrics()` 的 v2 口径，所以复现测试从"清洗表"这一层往下断言，
+  不直接调 `Service`，否则清洗缺陷会一起混进来，定位不出是哪一层坏了。
+* **P2（检索层）**：**不能用 `tests/conftest.py` 里那个 `client` 夹具**——
+  它把 `Retriever.search` 换成了固定返回，用它测检索等于测替身。
+  这一层一律从 `knowledge_base/` 造真实索引。
 """
 
 from __future__ import annotations
@@ -29,11 +34,19 @@ _spec.loader.exec_module(_parent)
 
 EXPECTED = _parent.EXPECTED
 WORKSPACE = _parent.WORKSPACE
+KB_DIR = WORKSPACE / "knowledge_base"
 
 #: 六条剔除规则的期望计数（独立复算，期望值写在 tests/conftest.EXPECTED 里）。
 EXPECTED_REMOVED = EXPECTED["removed"]
 EXPECTED_VALID = EXPECTED["valid_sales_rows"]
 EXPECTED_RAW = EXPECTED["raw_sales_rows"]
+
+#: 期望进入索引的文档数（目录里 36 个文件，其中 README.md 没有 KB 编号）。
+EXPECTED_KB_DOCS = 35
+
+#: 只用 starter 那个 .md 白名单时会丢掉的三篇（D7）。
+#: 它们恰好都是题库金标答案所在的文档。
+LOST_WITHOUT_TXT_HTML = ("KB-022", "KB-061", "KB-062")
 
 
 @pytest.fixture(scope="session")
@@ -93,3 +106,60 @@ def table_exists(db: Path, name: str) -> bool:
             "SELECT COUNT(*) FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0] > 0
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# P2 检索层夹具
+# ---------------------------------------------------------------------------
+
+def build_index(kb_dir: Path = KB_DIR):
+    """按当前实现加载知识库并建索引（复现阶段指向 starter 老实现）。"""
+    from kbqa.index import build_index as _build
+
+    return _build(kb_dir)
+
+
+def load_documents(kb_dir: Path = KB_DIR):
+    """按当前实现加载知识库，返回（文档列表, warnings）。"""
+    from kbqa.loader import load_knowledge_base
+
+    return load_knowledge_base(kb_dir)
+
+
+@pytest.fixture(scope="session")
+def kb_dir() -> Path:
+    return KB_DIR
+
+
+@pytest.fixture(scope="session")
+def documents():
+    docs, _warnings = load_documents()
+    return docs
+
+
+@pytest.fixture(scope="session")
+def index():
+    return build_index()
+
+
+@pytest.fixture(scope="session")
+def retriever(index):
+    from datetime import date
+
+    from kbqa.retriever import Retriever
+
+    return Retriever(index, date(2026, 9, 1))
+
+
+@pytest.fixture(scope="session")
+def today():
+    from datetime import date
+
+    return date(2026, 9, 1)
+
+
+def doc_of(documents, doc_id: str):
+    for document in documents:
+        if document.doc_id == doc_id:
+            return document
+    return None
