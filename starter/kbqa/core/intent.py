@@ -125,6 +125,7 @@ def classify(question: str, metric_word: Optional[str] = None) -> Intent:
         has_any,
         is_abnormal,
         PAYMENT_WORDS,
+        SALES_RANK_WORDS,
         TARGET_WORDS,
         WHY_WORDS,
     )
@@ -144,6 +145,11 @@ def classify(question: str, metric_word: Optional[str] = None) -> Intent:
         # 「现金支付占比是多少」：支付结构也是数据库能算的经营指标（payment_mix），
         # 没有它，「8 月 3 日 S05 的现金支付占比…为什么」会被 ② 漏掉、按纯文档答（H05）。
         metric = "payment"
+    if not metric and has_any(text, SALES_RANK_WORDS):
+        # 「六月卖得最好的单品是什么」：销量排行也是能查库的（top_products）。
+        # 现场调试演练 1 的教训：planner 明明判了 top_products，意图复核因为
+        # 认不出指标词又把它掰回 doc——复核层必须认识 planner 认识的所有"能查"的形状。
+        metric = "qty"
     if metric:
         intent.metric = metric
 

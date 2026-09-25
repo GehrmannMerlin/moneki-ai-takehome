@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import date
 from typing import Optional
@@ -13,7 +14,7 @@ from .hybrid import HybridAnswers
 from .planner import Plan
 from .core.retriever import Retriever, SearchResult
 from .schemas import Answer
-from .core.tokenizer import content_tokens, tokenize
+from .core.tokenizer import content_tokens, normalise, tokenize
 
 #: 拒答闸门。两个互补的信号：
 #: `vocab` —— 问题里的词有多少在整个知识库的词表里出现过（“工资”“下雨”一个都找不到）；
@@ -109,6 +110,13 @@ class Answerer(HybridAnswers):
             if citations and not candidate.get("rescued") and not (new_terms - used_terms):
                 continue
             unit = candidate["unit"]
+            # 现场调试演练 2 的教训：引用标题等于没引用——
+            # 「S02 的推荐菜是什么」KB 里真没有答案，于是把 H1 标题
+            # "# 门店档案：S02 Makai Poke" 原样引了出来，看着像答了其实什么都没说。
+            # 这种句子宁可放弃（让位给拒答），也不能当"事实"给出去。
+            title = candidate["meta"].get("title", "")
+            if title and _skeleton(unit.text) == _skeleton(title):
+                continue
             if "reason" in focus_kinds(plan.standalone):
                 unit = self.facts.extend_to_cause(unit)
             citation = self.facts.cite(candidate["doc_id"], unit.text)
@@ -429,6 +437,15 @@ class Answerer(HybridAnswers):
         # starter 拼了（`self._context(result) + body`），于是 answer 变成
         # "整篇原文 + 结论"，超 1200 字上限的题全部判红（D17）。
         return Answer(answer=body, answer_type="doc", citations=citations)
+
+
+def _skeleton(text: str) -> str:
+    """去掉所有标点/符号/空白后的骨架，用于"这句话是不是就是标题"的判断。
+
+    标题写法不统一（"门店档案 S02 Makai Poke" vs 正文 H1 "# 门店档案：S02 Makai Poke"），
+    逐字比会漏；只留中文字符与字母数字再比，才抓得住"换了个写法的同一个标题"。
+    """
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", text or "")
 
 
 def _truncate_at_sentence(text: str, limit: int) -> str:

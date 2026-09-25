@@ -456,6 +456,44 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+
+## 缺陷 #25：销量排行问题被意图复核掰回纯文档，答成门店档案【P5 现场调试演练 1 发现】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 演练题「S03 六月卖得最好的单品是什么？」（公开题库没有的问法）回答是 `doc`，引了 KB-032 门店档案——planner 的 trace 里明明记着 `intent=data kind=top_products`。 |
+| **假设** | ① `_answer_data` 的 top_products 分支坏了（**排除**：plan 阶段就对，作答层没执行到）；② 意图复核把 planner 的判定覆盖了（**成立**）。 |
+| **验证** | `core/intent.classify("S03 六月卖得最好的单品是什么？")` → `doc, 0.4`：`find_metric` 认不出"卖得最好"（`METRIC_WORDS` 只有五个指标），于是落到兜底分支 ⑥；`apply_intent` 见 `doc` 就覆盖 planner 的 `intent/kind`。这与 H05（支付占比）是**同一类根因**：复核层不认识 planner 认识的"能查库"的形状。 |
+| **根因** | `starter/kbqa/core/intent.py::classify`：`SALES_RANK_WORDS`（卖得最好/最畅销/销冠…）没有当作指标信号。 |
+| **修复** | `metric` 兜底链补第三级：`find_metric → PAYMENT_WORDS → SALES_RANK_WORDS`。与 H05 的修复方式完全同构。 |
+| **回归测试** | `tests/defects/test_drill.py::test_rank_question_routes_to_top_products`、`test_intent_recheck_recognizes_rank_words`<br>**修复前确实是红的**：`answer_type=doc`、无 data_evidence<br>修复后：`data` + top_products 证据，答"卖得最好的是小笼包（P07）净营业额 5390.00 元、销量 245 件" |
+
+---
+
+## 缺陷 #26：知识库真没答案时，把文档标题原样引用出来充当回答【P5 现场调试演练 2 发现】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 演练题「S02 的推荐菜是什么？」（知识库里确实没有推荐菜）回答是 `doc`，引用的 quote 是 H1 标题本身："# 门店档案：S02 Makai Poke"——看着像答了，其实什么都没说。 |
+| **假设** | ① 检索没找对文档（**排除**：KB-031 就是 S02 的档案，检索没错）；② 挑句层把标题当成了候选句（**成立**）。 |
+| **验证** | dump `_doc_block` 的候选：第一名是 `kind=table`、`text='# 门店档案：S02 Makai Poke'`（H1 行被切块器当成表格行），句子级打分虽然带 0.5 倍标题惩罚，但在"整篇只有标题与问句沾边"时它就是最高分。逐字比标题还会漏：标题是"门店档案 S02 Makai Poke"（空格），正文 H1 是"# 门店档案：S02 Makai Poke"（`#`+冒号）。 |
+| **根因** | `starter/kbqa/answerer.py::_doc_block`：没有"标题不能当事实引用"这道闸。 |
+| **修复** | 引用循环里加 `_skeleton` 比较：去掉全部符号/空白后与文档标题相同的候选句直接跳过——宁可贵一条引用，也不给一句废话。**已知残留**：该题现在引的是"门店名称：Makai Poke"那一行（比引标题好，但仍不是对"推荐菜"的回答）；"问的东西 KB 里根本没有"的通用识别仍靠拒答闸的词表覆盖率，这题的覆盖率恰好卡在阈值上方，属已知限制。 |
+| **回归测试** | `tests/defects/test_drill.py::test_heading_title_is_not_cited_as_fact`<br>**修复前确实是红的**：citations 里的 quote 就是标题本身<br>修复后：标题不再出现在引用里 |
+
+---
+
+## 附：现场调试演练计时（P5 §3，模拟评委 40 分钟环节）
+
+| 演练 | 题目 | 定位耗时 | 修复+回归测试 | 方法论回放 |
+|---|---|---|---|---|
+| 1 | 「S03 六月卖得最好的单品是什么？」 | ≈3 分钟 | ≈10 分钟 | 复现（answer_type=doc 不对劲）→ 看 trace（plan 里 intent=top_products，复核层却输出 doc——**两步自相矛盾就是线索**）→ 最小实验（直接调 `classify()` 复现 doc/0.4）→ 修 `intent.py` 兜底链 → 红测试钉住 → 全量回归 225 passed |
+| 2 | 「S02 的推荐菜是什么？」 | ≈3 分钟 | ≈15 分钟 | 复现（回答=标题原样）→ dump `_doc_block` 候选（第一名是 H1 行）→ 假设"标题被当候选"→ 做反证：确认标题写法不一致导致逐字比漏掉 → `_skeleton` 比较 → 红测试 → 全量回归 |
+
+两题的共同教训：**trace 里"两步自相矛盾"（plan 说 A、复核说 B）和"回答看着像答了其实什么都没说"（引用=标题）是最值钱的信号**，与 AI_USAGE 2.11/2.13 是同一类观察。
+
+---
+
 ## 附：本文件维护约定
 
 - 每条缺陷在**修复落地**时才填「修复」与红证据；未落地的写"待 PX"。
