@@ -252,6 +252,51 @@ def test_estimate_numbers_not_in_allowed_pool(service):
 # --------------------------------------------------------------------------- D29
 
 
+def test_no_explanation_answer_clears_citations(service):
+    """D31（H06 复盘）：回答明说"没有找到"解释时，引用必须清空（cite_max=0）。
+
+    真实 Key 复盘：模型把数据事实与"没有找到"都说对了，但为了展示
+    "我查过了"点名了别家门店的停业通知（S03 的 KB-020、S05 的 KB-027）
+    当例子——评测对"why 类且无解释文档"判 cite_max=0。
+    mock 管线早有对应规则（缺陷 #22 的 cause_not_found 槽位），
+    live 侧对齐：正文明说没找到，就不许挂擦边引用。
+    """
+    plan = service.planner.plan("S02 在 8 月 17 日到 19 日为什么一分钱营业额都没有？")
+    client = ScriptedClient([
+        _tool_reply("daily_metrics",
+                    {"start": "2026-08-17", "end": "2026-08-19", "store_id": "S02"}),
+        _content_reply(
+            "S02 在 8 月 17—19 日营业额均为 0 元、订单 0 单，三天完全没有交易。"
+            "停业的具体原因没有找到相关通知或说明；我查过停业通知与例会纪要 "
+            "[KB-020] [KB-027] [KB-029]，都只涉及其他门店。"),
+    ])
+    answer = _engine(service, client).answer(plan, _trace(service, "x"), [])
+    assert not answer.citations, (
+        "正文已明说'没有找到'，却还挂着引用 %s——评测 cite_max=0 判的就是这个"
+        % [c["doc_id"] for c in answer.citations])
+    assert "没有找到" in answer.answer, "清引用不该动正文"
+    assert answer.answer_type in ("data", "hybrid", "refusal"), (
+        "清引用后 answer_type 变成 %s——评测允许 data/hybrid/refusal" % answer.answer_type)
+
+
+def test_explanation_found_keeps_citations(service):
+    """D31 的反向护栏：找到了原因并引用正确的文档时，不许误杀。
+
+    H01 有真解释文档（S03 停业通知 KB-020），回答里"没有找到"只可能出现在
+    别的子句里；主句是"原因是 [KB-020]"时不触发清空。
+    """
+    plan = service.planner.plan("S03 六月第二周的营业额为什么比别的周低？")
+    client = ScriptedClient([
+        _tool_reply("search_kb", {"query": "S03 停业 通知"}),
+        _content_reply(
+            "S03 六月第二周前三天营业额为 0。原因是门店自 6 月 8 日起停业 4 天整改排烟管道 "
+            "[KB-020]。"),
+    ])
+    answer = _engine(service, client).answer(plan, _trace(service, "x"), [])
+    cited = {c["doc_id"] for c in answer.citations}
+    assert "KB-020" in cited, "找到了原因的引用被误杀了：%s" % sorted(cited)
+
+
 def test_tool_loop_exhaustion_forces_final_answer(service):
     """D29：模型连续要工具、永不给正文时，最后一轮必须**不带工具强制作答**。
 
