@@ -8,7 +8,9 @@ from typing import Any, Optional
 
 from .answerer import Answerer
 from .schemas import Answer
-from .cleaning import build_clean_db
+from .core.cleaning import build_clean_db
+from .core.datatools import DataTools
+from .core.metrics import MetricsEngine
 from .docfacts import DocFacts
 from .config import Settings, load_settings
 from .entities import Catalog
@@ -19,7 +21,6 @@ from .planner import Planner
 from .retriever import Retriever
 from .sessions import SessionStore
 from .toolspec import TOOL_NAMES, TOOLS
-from .tools import DataTools
 from .trace import Trace, TraceStore
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -39,7 +40,10 @@ class Service:
         settings = self.settings
         if not only_if_missing or not settings.clean_db.exists():
             build_clean_db(settings.source_db, settings.clean_db)
-        self.tools = DataTools(settings.clean_db)
+        # P1：口径引擎是唯一的指标出口，看板、/api/metrics/*、问答的 data_evidence
+        # 三处都走它，所以"口径一致"是结构保证，不是纪律。
+        self.engine = MetricsEngine(settings.clean_db)
+        self.tools = DataTools(self.engine)
         self.index = load_index(settings.kb_dir, settings.index_path, rebuild=not only_if_missing)
         self.retriever = Retriever(self.index, settings.today)
         self.catalog = Catalog(
@@ -126,6 +130,9 @@ class Service:
             return getattr(self.tools, name)(**cleaned)
         except (TypeError, ValueError) as exc:
             return {"error": "工具 %s 执行失败：%s" % (name, exc)}
+        except AttributeError:
+            # 工具声明与实现不同步时给结构化错误，不要让 /api/chat 变成 500
+            return {"error": "没有这个工具：%s，可用工具：%s" % (name, "、".join(TOOL_NAMES))}
 
     # -- 问答 -------------------------------------------------------------------
 

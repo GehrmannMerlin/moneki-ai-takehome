@@ -6,7 +6,7 @@ import json
 import sys
 import time
 
-from .cleaning import build_clean_db
+from .core.cleaning import build_clean_db
 from .config import load_settings
 from .index import load_index
 

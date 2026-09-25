@@ -158,7 +158,7 @@ def test_content_key_still_depends_on_code_versions(tmp_var, tmp_path, monkeypat
 
 def test_rebuild_idempotent(tmp_var, tmp_path, workspace: Path):
     """连续两次重建，清洗结果与索引规模必须一致（缓存键正确时才成立）。"""
-    from kbqa.cleaning import build_clean_db
+    from kbqa.core.cleaning import build_clean_db
     from kbqa.index import load_index
 
     clean_db = tmp_path / "var" / "clean.db"
