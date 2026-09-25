@@ -12,9 +12,15 @@ eval/_p*_raw/
 eval/_verify_raw/
 eval/_baseline_raw/
 eval/_preflight/
+eval/_regression_raw/
+eval/_*_check/
+eval/_*_extra/
 eval/report.md
 eval/__pycache__/
 docs/_*.txt
+docs/_*.png
+docs/_*.html
+docs/_*.log
 
 # 编辑器 / 系统
 .DS_Store
@@ -26,4 +32,8 @@ Thumbs.db
 .workbuddy/
 
 # 前端
+# 注意：`starter/kbqa/static/` 里的构建产物**要入库**——契约要求评委零构建启动，
+# 所以这里只忽略依赖目录与 vite 的临时文件。
 frontend/node_modules/
+frontend/dist/
+frontend/vite.config.ts.timestamp-*.mjs
