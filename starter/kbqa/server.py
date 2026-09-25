@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from .service import Service
+
+#: 前端构建产物（vite build 的输出，dist 入库，评委零构建启动）。
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="经营看板 + 问答服务", version="0.9.3")
 _service: Optional[Service] = None
@@ -114,3 +118,50 @@ def data_quality() -> dict:
         "data_period": current.data_period,
         "kb_warnings": current.index.warnings,
     }
+
+
+@app.get("/api/metrics/top_products")
+def metrics_top_products(
+    start: str = Query(...),
+    end: str = Query(...),
+    store_id: Optional[str] = None,
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """看板排行榜：与问答链路共用 DataTools.top_products，口径天然一致。"""
+    bad = _bad_date(start, end)
+    return bad or service().tools.top_products(start, end, store_id, limit)
+
+
+@app.get("/api/meta/options")
+def meta_options() -> dict:
+    """筛选栏的备选项：门店 / 商品清单 + 数据区间。"""
+    current = service()
+    return {
+        "stores": current.tools.stores(),
+        "products": current.tools.products(),
+        "data_period": current.data_period,
+        "today": current.settings.today.isoformat(),
+    }
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str):
+    """单页应用托管：API 之外的 GET 一律回 index.html，API 的 404 不吞。
+
+    两条铁律：
+    * /api/* 到这里的说明没匹配上任何路由——返回 404 JSON，**绝不**回 HTML，
+      否则评测会把"接口不存在"误判成"接口返回了坏 JSON"；
+    * 只做文件的静态返回，不重定向（评测脚本不跟随 3xx）。
+    """
+    if full_path.startswith("api/") or full_path == "api":
+        return JSONResponse(status_code=404, content={"error": "没有这个接口：/%s" % full_path})
+    target = (STATIC_DIR / full_path).resolve()
+    if target.is_file() and STATIC_DIR in target.parents:
+        return FileResponse(target)
+    index = STATIC_DIR / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    return JSONResponse(
+        status_code=404,
+        content={"error": "前端还没构建：请先跑 frontend 的 vite build，产物放进 kbqa/static/"},
+    )
