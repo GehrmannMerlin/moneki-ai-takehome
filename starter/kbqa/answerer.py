@@ -77,9 +77,21 @@ class Answerer(HybridAnswers):
         candidates = self._candidates(plan, result, require_value=True)
         if not candidates:
             candidates = self._candidates(plan, result, require_value=False)
+        want = expected_value_kind(plan.standalone)
+        if want and not any(carries(want, item["sentence"]) for item in candidates):
+            best_so_far = max((item["score"] for item in candidates), default=1.0) or 1.0
+            for item in self._value_rescue(plan, result, want):
+                item["score"] = 0.9 * best_so_far
+                candidates.append(item)
+        # 兜底救回来的候选**优先**：它带着问句要的那种值（金额/数量），
+        # 而 `limit=2` 意味着只有前两名能进 citations。
+        # 按 doc_score 排的话，「供应商赔了多少钱」的 KB-022（英文邮件，doc_score 最低）
+        # 会被挤到第三位、被 `limit` 挡掉——兜底逻辑等于白写。
+        # 检索的文档级分只决定"优先看哪篇"，而"哪篇真的答上了问题"由 carries() 判定，
+        # 后者是更强的信号。
         candidates.sort(
-            key=lambda item: (-round(item["doc_score"], 3), -round(item["score"], 2),
-                              item["effective_from"]))
+            key=lambda item: (not item.get("rescued"), -round(item["doc_score"], 3),
+                              -round(item["score"], 2), item["effective_from"]))
         lines: list[str] = []
         citations: list[dict] = []
         used_terms: set[str] = set()
@@ -94,7 +106,7 @@ class Answerer(HybridAnswers):
             if citations and candidate["score"] < 0.6 * best:
                 break
             new_terms = set(tokenize(candidate["sentence"])) & query_terms
-            if citations and not (new_terms - used_terms):
+            if citations and not candidate.get("rescued") and not (new_terms - used_terms):
                 continue
             unit = candidate["unit"]
             if "reason" in focus_kinds(plan.standalone):
@@ -123,7 +135,6 @@ class Answerer(HybridAnswers):
                     "这一版已经废止，现行规定见 %s《%s》，两者口径不同，报表一律按现行版。"
                     % (successor, self.retriever.index.docs_meta.get(successor, {}).get("title", ""))
                 )
-        want = expected_value_kind(plan.standalone)
         if len(citations) > 1 and want and all(carries(want, c["quote"]) for c in citations):
             dates = [
                 self.retriever.index.docs_meta.get(cited["doc_id"], {}).get("effective_from") or ""
@@ -132,6 +143,38 @@ class Answerer(HybridAnswers):
             if dates[0] and dates[1] and dates[0] > dates[1]:
                 lines.append("两份文档口径不一致时，以生效日期更新的 %s 为准。" % citations[0]["doc_id"])
         return "\n".join(lines)[:MAX_CONTEXT_CHARS], citations, best_score
+
+    def _value_rescue(self, plan: Plan, result: SearchResult, want: str) -> list[dict]:
+        """跨语言/低词面重叠时的兜底：按文档级相关性，直接找"带问句要的那种值"的句子。
+
+        C04 的教训：「供应商赔了我们多少钱」的答案在英文邮件 KB-022 里
+        （"credit note of CNY 8,600"），它与中文问句**一个词都不重叠**，
+        句子级打分得 0、永远浮不出来；但文档级检索明明找到了它。
+        问句要的是"钱"这个形状时，直接到相关文档里找带金额的句子。
+        """
+        for hit in self.answerable_hits(plan, result):
+            meta = self.retriever.index.docs_meta.get(hit.doc_id, {})
+            if meta.get("estimates_only"):
+                continue  # KB-001 §5.2：周报/纪要里的数字是估算，不能当答案
+            for unit in self.facts.units(hit.doc_id):
+                if len(unit.text) < 8 and unit.kind != "table":
+                    continue
+                if not carries(want, unit.text):
+                    continue
+                return [
+                    {
+                        "score": 0.0,  # 由调用方按当前 best 折算
+                        "raw": 0.0,
+                        "doc_score": float(hit.score),
+                        "doc_id": hit.doc_id,
+                        "meta": meta,
+                        "unit": unit,
+                        "sentence": unit.text,
+                        "effective_from": meta.get("effective_from") or "",
+                        "rescued": True,
+                    }
+                ]
+        return []
 
     def _candidates(self, plan: Plan, result: SearchResult, require_value: bool) -> list[dict]:
         """把各文档的候选句放在一起比较，按检索分数的相对高低加权。"""
@@ -212,6 +255,10 @@ class Answerer(HybridAnswers):
     def _merge_doc_side(self, plan: Plan, answer: Answer, trace=None) -> Answer:
         """一句话里既问了数字又问了规定时，把文档那一半也答上。"""
         if not plan.slots.get("two_part") or answer.answer_type != "data":
+            return answer
+        if plan.slots.get("cause_not_found"):
+            # H06（cite_max=0）：`_cause_block` 已经判定没有文档能解释这段异常，
+            # 这里再把检索到的相邻文档引上，等于拿不相关文档硬凑一个原因。
             return answer
         body, citations, confidence = self._doc_block(plan, self._search(plan, trace=trace))
         if not citations:
@@ -312,6 +359,8 @@ class Answerer(HybridAnswers):
                     citations=citations,
                     data_evidence=evidence,
                 )
+            # 没有文档能解释：记下这个事实，`_merge_doc_side` 不得再拿相邻文档凑引用。
+            plan.slots["cause_not_found"] = True
             text += "知识库里没有找到能解释这段时间的通知或说明，所以只能给出数字本身。"
         return Answer(answer=text, answer_type="data", data_evidence=evidence)
 

@@ -263,7 +263,9 @@ class Planner:
         # 用它当门刚好把"问规定的多少"排除掉，同时不动"问数字的多少"。
         if may_query and E.has_any(text, ("多少", "多久", "几")):
             plan.intent = "data"
-            if plan.kind in ("doc", "anomaly", "target", "price"):
+            # "target" 不在压低名单里：「卖了多少份？达到目标了吗」同时问实际值与目标，
+            # 压成 summary 会丢掉达标判定（H02 的 text_any 就是因此红的）。
+            if plan.kind in ("doc", "anomaly", "price"):
                 plan.kind = "summary"
         elif E.has_any(text, ("为什么", "原因", "怎么回事", "咋回事")):
             plan.intent, plan.kind = "doc", "doc"

@@ -124,6 +124,7 @@ def classify(question: str, metric_word: Optional[str] = None) -> Intent:
         focus_kinds,
         has_any,
         is_abnormal,
+        PAYMENT_WORDS,
         TARGET_WORDS,
         WHY_WORDS,
     )
@@ -139,6 +140,10 @@ def classify(question: str, metric_word: Optional[str] = None) -> Intent:
         return Intent(kind="clarify", confidence=0.9, hints=["空问题"])
 
     metric = metric_word or find_metric(lowered)
+    if not metric and has_any(text, PAYMENT_WORDS):
+        # 「现金支付占比是多少」：支付结构也是数据库能算的经营指标（payment_mix），
+        # 没有它，「8 月 3 日 S05 的现金支付占比…为什么」会被 ② 漏掉、按纯文档答（H05）。
+        metric = "payment"
     if metric:
         intent.metric = metric
 
