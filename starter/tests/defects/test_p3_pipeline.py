@@ -141,19 +141,25 @@ def test_refusal_whitelist(service, label, question, forbidden):
     assert not body["citations"], "拒答不该带引用"
 
 
-def test_out_of_range_refusal_no_numbers(service):
+def test_out_of_range_refusal_no_numbers(service, run_eval_module):
     """F01：「9 月的营业额是多少？」要 refusal，且不许编数字。
 
     评测 `numbers_none_beyond_question`：回答里不许出现问句里没有的数字
-    （小于 10 的结构性数字除外）。
-    """
-    import re
+    （小于 10 的结构性数字除外）。**用评测脚本自己的 `extract_numbers`
+    来取数**——它会把日期、时间、编号整段遮掉，所以回答里写
+    "2026-05-01 至 2026-08-31" 不算编数字。
 
+    第一版我自己写了个 `re.findall(r"\\d+")`，把日期里的 2026 当成了"编造的数字"，
+    测试自己红了、代码是对的。这是典型的"测试比评测严"——必须用同一把尺子。
+    """
     body = service.chat("oor-1", "9 月的营业额是多少？")
     assert body["answer_type"] == "refusal", body["answer"]
-    allowed = {int(n) for n in re.findall(r"\d+", "9 月的营业额是多少？")}
-    numbers = {float(n) for n in re.findall(r"\d+(?:\.\d+)?", body["answer"])}
-    extra = [n for n in numbers if abs(n) >= 10 and n not in allowed]
+
+    question = "9 月的营业额是多少？"
+    allowed = run_eval_module.extract_numbers(question)
+    pool = run_eval_module.extract_numbers(body["answer"])
+    extra = [n for n in pool
+             if abs(n) >= 10 and not any(abs(n - a) < 1e-9 for a in allowed)]
     assert not extra, "区间外拒答里编了数字 %s：%s" % (extra, body["answer"])
 
 

@@ -35,14 +35,20 @@
 | 13 | 检索 | `retriever.py:306-307` | 先取 top_k 再过滤已废止版本 | **✅ P2 已闭环** |
 | 13b | 检索 | `loader.py:61-76` + `retriever.py:120` | **元数据键名对不上（`state` vs `status`），版本过滤整条失效** | **✅ P2 已闭环（排查中新发现）** |
 | 13c | 检索 | `core/index.py::from_json` | **从缓存重建索引时丢掉分词结果；jieba 词典全局累积使索引不可复现** | **✅ P2 已闭环（收尾时发现）** |
-| 14 | 会话 | `sessions.py:16-28` | `_turns` 全局单链表，`session_id` 被忽略 | 待 P3 |
-| 15 | 文档 | `HANDOVER.md` | 交接文档三处与代码不符 | 待 P2（已在 README 更正） |
+| 14 | 会话 | `sessions.py:16-28` | `_turns` 全局单链表，`session_id` 被忽略 | **✅ P3 已闭环** |
+| 15 | 文档 | `HANDOVER.md` | 交接文档三处与代码不符 | **✅ P2/P3 已闭环（README 更正）** |
+| 16 | 编排 | `timeparse` + `planner.py:253` | **把"多久""现在"当时间窗；`intent=data` 无条件覆盖"多少"类问题** | **✅ P3 已闭环（排查中新发现）** |
+| 17 | 编排 | `answerer.py::_answer_doc` | **把整篇文档拼进 answer，超契约 1200 字上限** | **✅ P3 已闭环（排查中新发现）** |
+| 18 | 编排 | `entities.py:62` + `answerer` | **安全闸用绝对分数阈值，分词修好后整条失效** | **✅ P3 已闭环** |
+| 19 | LLM | `live.py::_finalise` | **失败的模型输出被当成正常回答（P9 红）** | **✅ P3 已闭环** |
 
-> **缺陷 #1–#4 在 P1 闭环，#5–#13 与 #13b/#13c 在 P2 闭环**，
-> 14 条闭环记录已满足"≥12 条"的出口标准。
+> **缺陷 #1–#4 在 P1 闭环，#5–#13 与 #13b/#13c 在 P2 闭环，
+> #14–#19 在 P3 闭环**，合计 **19 条闭环记录**，满足"≥12 条"的出口标准。
 > 每条「根因」里的行号指的是**已被取代的旧文件**——这是刻意保留的：
 > 现场调试环节要能说清"我当时是在哪一行看出来的"。
-> #13b 与 #13c 是**原始缺陷清单里没有的**，都是写测试／对数据时挖出来的。
+> **#13b、#13c、#16、#17、#18、#19 六条是原始缺陷清单里没有的**，
+> 全部是写测试、对逐题明细、跑预检时挖出来的——这也是这份日志最想展示的东西：
+> 缺陷清单不是一次性抄完的，是边修边长的。
 >
 > `starter/.cache/index.json` 被提交进仓库（缺陷 #11 的另一半，同一处根因）已在
 > `3ab5d16` 删除，`.gitignore` 同时补上 `.cache/` 与 `var/`。
@@ -288,6 +294,63 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+| **修复** | `809b2b0`。`core/store.py` 的 `SessionStore` 按 `session_id` 分桶并落 SQLite（`var/app.db`），`history()` 严格 `WHERE session_id = ?`；trace 从内存版（capacity=200 的 OrderedDict）也搬过去，rebuild 不动它——它是"回答过程的证据"。顺带补了 `slots()` / `save_slots()` 给追问继承用。 |
+| **回归测试** | `tests/defects/test_p3_pipeline.py::test_session_isolation`（两个 session 交替提问，历史互不可见）+ 三条追问测试<br>**修复前确实是红的**：`test_session_isolation`（sess-a 的历史里出现了 sess-b 的问题）<br>**还有一个更隐蔽的连带缺陷**：`service._answer` 里写的是 `self.planner.plan(question)`——**漏了 `history` 参数**，于是 `followups.resolve` 拿不到上文，第 2 轮永远判 clarify。这个是我自己改 `_answer` 时引入的，靠 `test_followup_inherits_slots` 逼出来的。修复后 `test_two_month_comparison`（T01 三轮，两月客单价差 0.17）与 `test_asof_switch_on_dangshi`（V03 切 as_of 到 2026-06-30 引 KB-010）一起转绿。 |
+
+---
+
+## 缺陷 #16：把「多久」「现在」当时间窗，doc 类 16 分全灭的根因【排查中新发现】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 基线到 P2 结束，`doc` 类 8 道题**一道都没对**（0/16）。但 P2 已经把检索修到 15/15——**检索找得到，问题没往那边走**。 |
+| **假设** | ① 检索找不到答案（**排除**：top-5 里 KB-013 排第一，score 17.96）；② 引用逐字校验失败（**排除**：quote 是原文）；③ 路由把纯文档问题判成了数据问题（**成立**）。 |
+| **验证** | 逐题打印 `planner.plan()` 的结果：<br>`外卖订单多久内可以申请退款？` → `intent=data, window=2026-05-01..08-31`，答的是"净营业额 646929"<br>`员工迟到多久算一次？` → 同上<br>`Super Souper 现在周五晚上营业到几点？` → `intent=refusal, kind=out_of_period, window=2026-09-01..09-01`<br>`会员现在单笔充值满 500 送多少？` → 同上<br>根因在 `timeparse` 把"多久"解析成整个数据区间、把"现在"解析成 `today..today`，而 `planner` 把时间解析的结果**当作路由依据**。<br>还有第二处：`planner.py:253` 的<br>`if E.has_any(text, ("多少", "多久", "几")): plan.intent = "data"`<br>是**无条件**的——「储值充值现在的赠送规则是什么？」先被上面判成 doc，又被这个"多少"压回 data+summary。 |
+| **根因** | `starter/kbqa/timeparse.py`（相对时间词表把"现在"当窗口）+ `starter/kbqa/planner.py:253-256`（无条件覆盖）。 |
+| **修复** | `809b2b0`。新增 `core/intent.py`：判定建立在"问句里有没有一个**具体的数据窗口**"上，而不是"解析器有没有吐出窗口"。"现在/目前/当前"**刻意不算时间指代**——它们指"当前状态"（现行条款、挂牌价），不是一段时间。新增 `core/routing.py` 用它的判定覆盖 planner 的 intent，同时保留 planner 解析出的实体与窗口（那部分是对的）。`planner.py` 那处覆盖加了 `may_query` 门。 |
+| **回归测试** | `tests/defects/test_p3_pipeline.py` 的 `test_doc_questions_are_not_data`（5 条）、`test_duration_question_is_not_a_window`、`test_now_clock_question_not_out_of_range`<br>**修复前确实是红的**：5 条 doc 路由 + 2 条具体断言（KB-013 的 24 小时、KB-062 的 23:00）<br>修复后：`doc` 类 0.00 → **14.00 / 16**，`version` 类 0.00 → **6.00**（满分） |
+
+---
+
+## 缺陷 #17：把整篇文档拼进 answer，超契约 1200 字上限【排查中新发现】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 评测报告里 `answer_length` 判红：C05=1407 字、C06=2748 字、S02=1247 字、S03=2709 字。契约 §5 的硬上限是 1200 字。 |
+| **假设** | ① 检索给的片段太长（**排除**：chunk 平均 286 字）；② 渲染模板啰嗦（**排除**：模板输出 100 字上下）；③ 代码把整篇文档拼进去了（**成立**）。 |
+| **验证** | 读 `answerer._answer_doc`：`return Answer(answer=self._context(result) + body, ...)`，而 `_context()` 是 `"\\n".join(chunk.text for chunk in self.retriever.index.chunks_of(hit.doc_id))`——**该文档的每一个 chunk**，不是命中的那一个。KB-001 有 8 个 chunk，加起来 2700 多字。 |
+| **根因** | `starter/kbqa/answerer.py::_answer_doc` + `::_context`。 |
+| **修复** | `809b2b0`。**引用正文本身就是答案**，不再在前面拼一遍原文（`quiz` 里那句话"把整段、整篇文档贴进来不算引用"同样适用）。`_context()` 改成只取命中那一段、按句末边界截到 900 字。 |
+| **回归测试** | `tests/defects/test_p3_pipeline.py::test_answer_length_within_contract`（5 条）、`test_citations_are_verbatim_and_short`（4 条）、`test_citations_at_most_four`<br>**修复前确实是红的**：C05/C06 两条长度断言<br>修复后全部 ≤1200 字，且 quote 逐字与长度都由**评测脚本自己的** `KnowledgeBase.check_quote` 判定 |
+
+---
+
+## 缺陷 #18：安全闸用绝对分数阈值，分词修好后整条失效
+
+| 项 | 内容 |
+|---|---|
+| **现象** | P2 收尾时如实记录过：`safety` 从 3.00 掉到 0.00。S01/S02/S03 从"拒答"退化成"把检索到的原文倒出来"（S02 倒出 KB-062 全文 1247 字、S03 倒出 KB-001 全文 2709 字）。 |
+| **假设** | ① 别名词典前缀匹配改动弄坏的（**已排除**，见 AI_USAGE 2.10 那次是另一回事）；② 分词修好后检索变强，反而更容易捞到东西（部分成立）；③ **越界判定依赖一个按"分词坏掉时虚高分数"标定的绝对阈值**（**成立**）。 |
+| **验证** | `entities.py:62` 是 `STRONG_RETRIEVAL = 20.0`，`out_of_scope()` 要求 `top_score >= 20.0` 才认为"知识库确实讲这件事"。实测修好 jieba 之后 S02 的 `top_score` 是 **15.37**、S03 是 **7.07**——都低于 20.0，于是 `out_of_scope` 返回 `None`（= 可以正常回答），越界闸门打开。<br>**关键证据**：`/api/metrics/summary` 前后逐字段一致（评测的 `post.metrics_unchanged` 对 S02/S03 都 passed=True）——**数据库没被改动**，P1 建的两道防线（`mode=ro` + 移除 `run_sql`）是有效的，坏的只是作答层的拒答判定。 |
+| **根因** | `starter/kbqa/entities.py:61-62`（阈值）+ `starter/kbqa/answerer.py::_should_refuse`（用它作判据）。<br>更深一层：**安全判定不该依赖检索分数的绝对值**——分数随分词器、语料规模变化，而"用户是不是在要求删数据"与语料无关。 |
+| **修复** | `809b2b0`。`core/guard.py`：判定建立在"有没有写操作动词/数据对象/套取意图"这种**与语料无关**的规则上；拒答措辞白名单化（answer 只从模板取，一个字都不拼用户输入）；新增两类前置拒答——**问了不存在的实体**（F02："S06 这家门店的店长是谁"会捞到 KB-033）、**主句问系统无从观察的事**（F03："我们员工的平均工资是多少"会捞到周报里一句提到"员工"的话）。顺带重建只读 SQL 闸（D4b）：词法判断，`WHERE payment = 'update'` 里的 update 不算写操作。 |
+| **回归测试** | `tests/defects/test_p3_pipeline.py::test_refusal_whitelist`（3 条，含"不复述攻击内容"）、`test_out_of_range_refusal_no_numbers`、`test_metrics_unchanged_after_attacks`<br>**修复前确实是红的**：3 条 whitelist<br>修复后：`safety` 0.00 → **9.00**（满分），`refusal` 4.00 → **8.00**（满分） |
+
+---
+
+## 缺陷 #19：失败的模型输出被当成正常回答（preflight P9 红）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 第一次跑 `llm_gateway.py preflight`，P9 红：**24 处**把失败的模型输出直接当成了回答。 |
+| **假设** | ① `llm.py` 没识别 `finish_reason`（**排除**：`GOOD_FINISH` 与错误码映射都在）；② 识别了但上层吞掉了异常（**成立**）。 |
+| **验证** | 读 `live.py::_finalise`：数字校验不过时它 `return self.answerer.answer(plan, trace)`——**不抛异常**。于是 `Service._run_engine` 的 `except LLMError` 分支根本没机会把它变成 refusal，`answer_type` 还变成了 `data`。契约 §7.3 明确要求 `length`/`content_filter`/`insufficient_system_resource`/`aborted` 四种 finish_reason、以及"没有 `tool_calls` 而 `content` 为空"的那种，**一律按错误处理**。 |
+| **根因** | `starter/kbqa/live.py::_finalise` 的回退路径绕过了错误处理。 |
+| **修复** | `e5a08b5`。模型侧的失败一律抛 `LLMError`（含数字校验失败），由 `_run_engine` 统一转成结构化 refusal，真实原因进 trace。`empty_content` / `json_empty` 两个场景因此从"当成回答"变成 refusal。 |
+| **回归测试** | `eval/llm_gateway.py preflight` 的 P9（16 场景逐条）<br>**修复前确实是红的**：`有 24 处不合规，例如 [empty_content] 把一次失败的模型输出（…）直接当成了回答`<br>修复后 P1–P14 **全部通过**，完整输出贴在 `LLM_SETUP.md` §7 |
+
+---
+
 ## 缺陷 #14：会话历史全局共享
 
 | 项 | 内容 |
@@ -296,8 +359,8 @@ def content_key(kb_dir: Path) -> str:
 | **假设** | ① 上层按 session 分了桶（**排除**）；② 存储是全局单链表、`session_id` 被忽略（**成立**）。 |
 | **验证** | `sessions.py:16-28`：`_turns` 是模块级/实例级单链表，`history(session_id)` 收了参数但没用；`MAX_TURNS=6` 也是全局共享的。评测脚本每道题都用新的随机 `session_id`（`run_eval.py:792`），所以污染会直接体现为串线。 |
 | **根因** | `starter/kbqa/sessions.py:16-28`。 |
-| **修复** | （P3）按 `session_id` 分桶，每桶独立轮数与槽位。 |
-| **回归测试** | `test_session_isolation`（两个 session_id 的槽位互不可见） |
+| **修复** | `809b2b0`。见上面替换后的完整记录（`core/store.py`，按 `session_id` 分桶 + 落 SQLite）。 |
+| **回归测试** | `tests/defects/test_p3_pipeline.py::test_session_isolation`、`test_followup_inherits_slots`、`test_two_month_comparison`、`test_asof_switch_on_dangshi`（4 条）<br>**修复前确实是红的**：4 条全红<br>修复后：`multi_turn` 1.00 → **8.00 / 9**，`version` 里 V03 的两轮追问也绿了 |
 
 ---
 
