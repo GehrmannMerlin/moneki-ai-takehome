@@ -16,6 +16,7 @@ eval/_regression_raw/
 eval/_*_raw/
 eval/_*_check/
 eval/_*_extra/
+eval/_live*_doc/
 eval/report.md
 eval/__pycache__/
 docs/_*.txt
