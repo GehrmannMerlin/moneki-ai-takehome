@@ -24,3 +24,6 @@ Thumbs.db
 
 # AI 助手会话的本地记忆目录（不是项目产物）
 .workbuddy/
+
+# 前端
+frontend/node_modules/
