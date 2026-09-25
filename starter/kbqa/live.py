@@ -163,6 +163,22 @@ class LiveEngine:
         question = plan.question
         if plan.standalone and plan.standalone != plan.question:
             question += "\n（这是一句追问，完整问题是：%s）" % plan.standalone
+        # D32：问"当时的规定"的 as-of 追问，必须把检索旁路告诉模型。
+        # 已被新版本取代的旧文档默认被检索闸挡在外面（retriever._eligible
+        # 按废止/生效日期过滤），唯一旁路是查询里带"旧版/当时的规定"这类词
+        # （retriever._wants_historical）。mock 管线靠 plan.slots['historical']
+        # 结构化放行；live 的 search_kb 只收一个 query 字符串，不提示的话
+        # 模型永远检索不到旧版本——真实 Key 复评 V03：模型连"会员储值政策
+        # v1"都精确点名了，8 次检索全空。
+        as_of_past = bool(plan.as_of) and plan.as_of.isoformat() < self.today
+        if as_of_past or plan.slots.get("historical"):
+            when = "%s 当时" % plan.as_of.isoformat() if as_of_past else "过去某一版"
+            question += (
+                "\n（系统提示：这个问题问的是%s有效的规定。已被新版本取代的旧文档"
+                "默认会被检索过滤掉，用 search_kb 时请在关键词里带上「旧版」"
+                "「当时的规定」「被取代」这类词，否则检索不到当时生效的旧版本。）"
+                % when
+            )
         messages.append({"role": "user", "content": question})
         return messages
 
