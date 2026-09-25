@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -75,17 +76,22 @@ class LLMClient:
         tools: Optional[list[dict]] = None,
         timeout: Optional[float] = None,
         on_call: Optional[Any] = None,
+        payload_dir: Optional[Path] = None,
     ) -> LLMReply:
         started = time.perf_counter()
         body = self._body(messages, tools)
+        # 契约 §6 要**完整**的最终提示词与模型原始输出。
+        # starter 这里调 `_preview(..., limit=4000)` 截断，trace 里看不到全貌——
+        # 调试面板与"数字是查出来的还是编的"这个判断都依赖它。
         record: dict[str, Any] = {
             "endpoint": self.endpoint,
             "model": self.model,
             "messages": len(messages),
             "tools": len(tools or []),
-            # 契约 §6：trace 里要看得到发给模型的最终提示词。
-            "prompt": _preview(json.dumps(messages, ensure_ascii=False)),
+            "prompt": json.dumps(messages, ensure_ascii=False),
+            "request_body": json.dumps(body, ensure_ascii=False),
         }
+        record = _shrink_if_huge(record, payload_dir, "prompt", "request_body")
         try:
             response = httpx.post(
                 self.endpoint,
@@ -94,7 +100,15 @@ class LLMClient:
                     "Authorization": "Bearer %s" % self.api_key,
                     "Content-Type": "application/json",
                 },
-                timeout=httpx.Timeout(timeout or self.timeout, connect=15.0),
+                # **read 与 connect 分开**：连接建立但服务端永不响应（preflight 的
+                # `hang` 场景）时，只有 read 超时能把它打断。starter 把两者写在
+                # 同一个 `httpx.Timeout(...)` 位置参数上，语义不清。
+                timeout=httpx.Timeout(
+                    read=timeout or self.timeout,
+                    connect=min(15.0, timeout or self.timeout),
+                    write=min(30.0, timeout or self.timeout),
+                    pool=min(15.0, timeout or self.timeout),
+                ),
             )
         except httpx.TimeoutException as exc:
             record.update(error="timeout", detail=str(exc))
@@ -113,9 +127,11 @@ class LLMClient:
             self._note(on_call, record, started)
             raise LLMError("http_error", detail, status=response.status_code)
 
-        # D14：服务繁忙时正文前面会有空行，json 解析要能跳过。
+        # D14：服务繁忙时正文前面会有空行、SSE 里会有 `: keep-alive` 注释行，
+        # json 解析要能跳过它们（`_strip_noise`）。
+        cleaned = _strip_noise(response.text)
         try:
-            payload = json.loads(response.text.strip() or "{}")
+            payload = json.loads(cleaned or "{}")
         except ValueError as exc:
             record.update(error="bad_json", detail=response.text[:200])
             self._note(on_call, record, started)
@@ -135,12 +151,14 @@ class LLMClient:
             finish_reason=finish,
             content_chars=len(content),
             tool_calls=[call.get("function", {}).get("name") for call in tool_calls],
+            tool_call_ids=[call.get("id") for call in tool_calls],
             has_reasoning=bool(message.get("reasoning_content")),
             usage=payload.get("usage"),
             # 契约 §6：模型原始输出也要留痕。思考过程只留在 trace 里，不进任何对外字段。
-            raw_content=_preview(content),
-            raw_reasoning=_preview(message.get("reasoning_content") or ""),
+            raw_content=content,
+            raw_reasoning=message.get("reasoning_content") or "",
         )
+        record = _shrink_if_huge(record, payload_dir, "raw_content", "raw_reasoning")
         self._note(on_call, record, started)
 
         if finish not in GOOD_FINISH:
@@ -181,7 +199,52 @@ class LLMClient:
             on_call(record)
 
 
+def _strip_noise(text: str) -> str:
+    """去掉服务端为保持连接而插入的噪声，留下真正的 JSON 正文。
+
+    DeepSeek 文档《Rate Limit》：服务繁忙时**非流式响应体前面会有空行**，
+    流式响应里会有 `: keep-alive` 注释行。`json.loads` 对前导空行其实是宽容的，
+    但 SSE 注释行不是——遇到就整段解析失败。两种情况一起处理。
+    """
+    if not text:
+        return ""
+    lines = [line for line in text.splitlines()
+             if not line.lstrip().startswith(":")]
+    return "\n".join(lines).strip()
+
+
+def _shrink_if_huge(record: dict, payload_dir: Optional[Path], *keys: str) -> dict:
+    """某几个字段太大时写文件、trace 里留路径（契约 §6 要完整，但不必塞进 DB）。
+
+    阈值 256KB：正常一轮提示词加工具定义也就几 KB，
+    真到 256KB 一般是长上下文或异常响应，那种体积不该进 SQLite。
+    """
+    if payload_dir is None:
+        return record
+    for key in keys:
+        value = record.get(key)
+        if not isinstance(value, str) or len(value) <= _PAYLOAD_LIMIT:
+            continue
+        try:
+            payload_dir.mkdir(parents=True, exist_ok=True)
+            path = payload_dir / ("%s-%s.json" % (record.get("trace_hint") or "call", key))
+            path.write_text(value, encoding="utf-8")
+            record[key + "_truncated"] = True
+            record[key] = "<完整内容见 %s （%d 字节）>" % (path.name, len(value))
+        except OSError:                                   # pragma: no cover
+            record[key] = value[: _PAYLOAD_LIMIT] + "…（截断，写文件失败）"
+    return record
+
+
+_PAYLOAD_LIMIT = 256 * 1024
+
+
 def _preview(text: str, limit: int = 4000) -> str:
+    """**已废弃**：契约 §6 要完整的提示词与原始输出，不要再截断。
+
+    留着这个函数只是为了让"为什么不能截断"这件事在代码里有痕迹——
+    缺陷 D15 就是它造成的。新代码不要调它。
+    """
     text = text or ""
     return text if len(text) <= limit else text[:limit] + "…（截断，共 %d 字）" % len(text)
 

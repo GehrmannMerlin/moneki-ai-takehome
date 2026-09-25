@@ -1,0 +1,2882 @@
+{
+  "tool": "llm_gateway.py",
+  "version": "2.0.0",
+  "generated_at": "2026-09-25T21:00:38.106+08:00",
+  "service_url": "http://localhost:8000",
+  "env": {
+    "LLM_BASE_URL": "http://127.0.0.1:8901/ds-gw",
+    "LLM_API_KEY": "preflight-key-3b9c1f",
+    "LLM_MODEL": "preflight-model-7f3a"
+  },
+  "reasoning_marker": "RSN-cebd2902aa42",
+  "passed": true,
+  "failed_checks": [],
+  "skipped_checks": [],
+  "checks": [
+    {
+      "id": "P1",
+      "title": "服务确实把请求发到了注入的 LLM_BASE_URL（含路径前缀）",
+      "status": "PASS",
+      "reason": "共观察到 60 次 POST /ds-gw/chat/completions。",
+      "evidence": {
+        "expected_base_url": "http://127.0.0.1:8901/ds-gw",
+        "expected_path": "/ds-gw/chat/completions",
+        "chat_completions_requests": 60,
+        "per_scenario": {
+          "normal": 6,
+          "thinking_starved": 6,
+          "empty_content": 4,
+          "json_empty": 6,
+          "bad_tool_args": 4,
+          "content_filter": 2,
+          "insufficient_resource": 4,
+          "aborted": 2,
+          "http_401": 2,
+          "http_402": 2,
+          "http_422": 2,
+          "http_429": 4,
+          "http_500": 4,
+          "http_503": 4,
+          "slow": 6,
+          "hang": 2
+        }
+      }
+    },
+    {
+      "id": "P2",
+      "title": "请求里的 model 等于注入的 LLM_MODEL",
+      "status": "PASS",
+      "reason": "全部请求都用了 preflight-model-7f3a。",
+      "evidence": {
+        "expected": "preflight-model-7f3a",
+        "seen": {
+          "preflight-model-7f3a": 60
+        }
+      }
+    },
+    {
+      "id": "P3",
+      "title": "注入的 Key 以 Authorization: Bearer 发送",
+      "status": "PASS",
+      "reason": "全部请求都带了正确的 Bearer Key。",
+      "evidence": {
+        "requests": 60,
+        "missing_authorization_in": [],
+        "non_bearer_schemes": [],
+        "key_mismatch_in": []
+      }
+    },
+    {
+      "id": "P4",
+      "title": "只用了 DeepSeek 文档列出的顶层参数",
+      "status": "PASS",
+      "reason": "只出现了 DeepSeek 文档列出的顶层参数。",
+      "evidence": {
+        "documented": [
+          "frequency_penalty",
+          "logprobs",
+          "max_tokens",
+          "messages",
+          "model",
+          "presence_penalty",
+          "reasoning_effort",
+          "response_format",
+          "stop",
+          "stream",
+          "stream_options",
+          "temperature",
+          "thinking",
+          "tool_choice",
+          "tools",
+          "top_logprobs",
+          "top_p",
+          "user_id"
+        ],
+        "extra_params": {}
+      }
+    },
+    {
+      "id": "P5",
+      "title": "max_tokens 不设，或不小于 2048",
+      "status": "PASS",
+      "reason": "max_tokens 都不小于 2048。",
+      "evidence": {
+        "min_required": 2048,
+        "values_seen": [
+          "4096"
+        ],
+        "offenders": []
+      }
+    },
+    {
+      "id": "P6",
+      "title": "没有访问 {prefix}/chat/completions 之外的任何路径",
+      "status": "PASS",
+      "reason": "只访问了 POST /ds-gw/chat/completions，没有碰任何别的路径。",
+      "evidence": {
+        "allowed": "POST /ds-gw/chat/completions",
+        "requests_seen": 60,
+        "other_paths": []
+      }
+    },
+    {
+      "id": "P7",
+      "title": "工具定义规范，且每一个工具调用都以 role=tool + tool_call_id 回传",
+      "status": "PASS",
+      "reason": "工具定义规范，44 个工具调用的结果都正确回传了。",
+      "evidence": {
+        "declared_tools": true,
+        "announced_tool_calls": 44,
+        "returned_tool_results": 44,
+        "problems": []
+      }
+    },
+    {
+      "id": "P8",
+      "title": "每个场景下 /api/chat 都返回 HTTP 200 与字段完整的合法 JSON",
+      "status": "PASS",
+      "reason": "32 次问答全部返回 200 和字段完整的 JSON。",
+      "evidence": {
+        "attempts": 32,
+        "failures": []
+      }
+    },
+    {
+      "id": "P9",
+      "title": "模型不可用时给出结构化 refusal，answer 从不是空串",
+      "status": "PASS",
+      "reason": "模型不可用的场景下都给了结构化 refusal 或有据可查的回答，answer 从不是空串。",
+      "evidence": {
+        "failing_scenarios": [
+          "aborted",
+          "bad_tool_args",
+          "content_filter",
+          "empty_content",
+          "hang",
+          "http_401",
+          "http_402",
+          "http_422",
+          "http_429",
+          "http_500",
+          "http_503",
+          "insufficient_resource"
+        ],
+        "checked": 24,
+        "skipped_invalid_responses": 0,
+        "failure_marker": "FAILOUT-0b9df8d6e1cf",
+        "declared_tools": [
+          "by_store",
+          "by_store_category",
+          "compare_periods",
+          "daily_metrics",
+          "first_sale_date",
+          "payment_mix",
+          "query_metrics",
+          "search_kb",
+          "top_products",
+          "unit_price_check"
+        ],
+        "problems": []
+      }
+    },
+    {
+      "id": "P10",
+      "title": "思考内容没有漏进 answer / citations / data_evidence",
+      "status": "PASS",
+      "reason": "32 次回答里，思考标记都没有出现在任何对外字段里。",
+      "evidence": {
+        "marker": "RSN-cebd2902aa42",
+        "inspected_answers": 32,
+        "responses_carrying_the_marker": 40,
+        "requests_with_thinking_disabled": 0,
+        "leaks": []
+      }
+    },
+    {
+      "id": "P11",
+      "title": "/api/chat 在时限内返回（含长时间无响应的场景）",
+      "status": "PASS",
+      "reason": "最慢的一次是 23.55 秒，都在 180 秒以内。",
+      "evidence": {
+        "limit_seconds": 180.0,
+        "timed_attempts": 32,
+        "slowest": [
+          {
+            "scenario": "slow",
+            "seconds": 23.55
+          },
+          {
+            "scenario": "slow",
+            "seconds": 22.88
+          },
+          {
+            "scenario": "hang",
+            "seconds": 21.75
+          },
+          {
+            "scenario": "hang",
+            "seconds": 21.7
+          },
+          {
+            "scenario": "json_empty",
+            "seconds": 5.28
+          }
+        ],
+        "offenders": [],
+        "unreachable_attempts": []
+      }
+    },
+    {
+      "id": "P12",
+      "title": "注入环境变量后 /api/health 报告 llm_mode = live",
+      "status": "PASS",
+      "reason": "llm_mode = live。",
+      "evidence": {
+        "status": 200,
+        "error": null,
+        "body": {
+          "status": "ok",
+          "llm_mode": "live",
+          "kb_docs": 35,
+          "kb_chunks": 113,
+          "valid_sales_rows": 18290,
+          "today": "2026-09-01",
+          "data_period": {
+            "start": "2026-05-01",
+            "end": "2026-08-31"
+          },
+          "cleaning_report": {
+            "raw_rows": 18628,
+            "removed": {
+              "1_unparseable_date": 8,
+              "2_empty_amount": 150,
+              "3_qty_le_zero": 30,
+              "4_store_not_in_stores": 10,
+              "5_product_not_in_products": 40,
+              "6_duplicate_row": 100,
+              "note_unparseable_amount": 0
+            },
+            "kept_rows": 18290,
+            "kept_sales_rows": 18196,
+            "kept_refund_rows": 94,
+            "duplicate_groups": 100,
+            "v2_backfilled_rows": 150,
+            "v2_refund_rows": 94,
+            "rejected_rows": 338
+          },
+          "index_key": "8fe4ce51aa14",
+          "kb_warnings": [
+            "跳过没有 KB 编号的文件：README.md"
+          ]
+        }
+      }
+    },
+    {
+      "id": "P13",
+      "title": "多轮工具调用之间 reasoning_content 原样回传（没有触发 400）",
+      "status": "PASS",
+      "reason": "18 次多轮请求都原样回传了 reasoning_content。",
+      "evidence": {
+        "requests_rejected_with_400": [],
+        "requests_echoing_reasoning": 18,
+        "requests_with_thinking_disabled": 0
+      }
+    },
+    {
+      "id": "P14",
+      "title": "保持连接的空行与 SSE 注释没有把服务弄坏",
+      "status": "PASS",
+      "reason": "正文前的空行和 SSE 的 `: keep-alive` 注释都被正确跳过了，slow 场景照常给出回答。",
+      "evidence": {
+        "normal_answered": true,
+        "slow_answered": true,
+        "slow_statuses": [
+          200,
+          200
+        ],
+        "slow_answer_types": [
+          "data",
+          "data"
+        ]
+      }
+    }
+  ],
+  "health": {
+    "status": 200,
+    "error": null,
+    "body": {
+      "status": "ok",
+      "llm_mode": "live",
+      "kb_docs": 35,
+      "kb_chunks": 113,
+      "valid_sales_rows": 18290,
+      "today": "2026-09-01",
+      "data_period": {
+        "start": "2026-05-01",
+        "end": "2026-08-31"
+      },
+      "cleaning_report": {
+        "raw_rows": 18628,
+        "removed": {
+          "1_unparseable_date": 8,
+          "2_empty_amount": 150,
+          "3_qty_le_zero": 30,
+          "4_store_not_in_stores": 10,
+          "5_product_not_in_products": 40,
+          "6_duplicate_row": 100,
+          "note_unparseable_amount": 0
+        },
+        "kept_rows": 18290,
+        "kept_sales_rows": 18196,
+        "kept_refund_rows": 94,
+        "duplicate_groups": 100,
+        "v2_backfilled_rows": 150,
+        "v2_refund_rows": 94,
+        "rejected_rows": 338
+      },
+      "index_key": "8fe4ce51aa14",
+      "kb_warnings": [
+        "跳过没有 KB 编号的文件：README.md"
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "scenario": "normal",
+      "llm_requests": 6,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-normal-0-761fc9a5",
+          "status": 200,
+          "elapsed_seconds": 5.078,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0099"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-normal-1-f829d252",
+          "status": 200,
+          "elapsed_seconds": 4.984,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0100"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "thinking_starved",
+      "llm_requests": 6,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-thinking_starved-0-c083489e",
+          "status": 200,
+          "elapsed_seconds": 4.985,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0101"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-thinking_starved-1-8047f604",
+          "status": 200,
+          "elapsed_seconds": 4.797,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0102"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "empty_content",
+      "llm_requests": 4,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-empty_content-0-cca7f7fd",
+          "status": 200,
+          "elapsed_seconds": 4.343,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（返回了空回答），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0103"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-empty_content-1-e30965ac",
+          "status": 200,
+          "elapsed_seconds": 4.344,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（返回了空回答），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0104"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "json_empty",
+      "llm_requests": 6,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-json_empty-0-e101724a",
+          "status": 200,
+          "elapsed_seconds": 5.25,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0105"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-json_empty-1-55139993",
+          "status": 200,
+          "elapsed_seconds": 5.281,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0106"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "bad_tool_args",
+      "llm_requests": 4,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-bad_tool_args-0-ef566632",
+          "status": 200,
+          "elapsed_seconds": 3.547,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（工具参数无法解析），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0107"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-bad_tool_args-1-0f9a5d5a",
+          "status": 200,
+          "elapsed_seconds": 3.688,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（工具参数无法解析），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0108"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "content_filter",
+      "llm_requests": 2,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-content_filter-0-3e29f159",
+          "status": 200,
+          "elapsed_seconds": 1.828,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（被内容过滤拦截），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0109"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-content_filter-1-a25d452a",
+          "status": 200,
+          "elapsed_seconds": 1.937,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（被内容过滤拦截），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0110"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "insufficient_resource",
+      "llm_requests": 4,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-insufficient_resource-0-a791e2b0",
+          "status": 200,
+          "elapsed_seconds": 4.547,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（服务端资源不足），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0111"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-insufficient_resource-1-8f485cfc",
+          "status": 200,
+          "elapsed_seconds": 4.641,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（服务端资源不足），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0112"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "aborted",
+      "llm_requests": 2,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-aborted-0-83ec3cc4",
+          "status": 200,
+          "elapsed_seconds": 1.875,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（请求被中止），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0113"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-aborted-1-7280fafd",
+          "status": 200,
+          "elapsed_seconds": 1.875,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（请求被中止），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0114"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "http_401",
+      "llm_requests": 2,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-http_401-0-a7f57aee",
+          "status": 200,
+          "elapsed_seconds": 1.89,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 401），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0115"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-http_401-1-0be45cab",
+          "status": 200,
+          "elapsed_seconds": 1.829,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 401），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0116"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "http_402",
+      "llm_requests": 2,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-http_402-0-9a20af04",
+          "status": 200,
+          "elapsed_seconds": 1.921,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 402），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0117"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-http_402-1-eb84b7de",
+          "status": 200,
+          "elapsed_seconds": 1.75,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 402），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0118"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "http_422",
+      "llm_requests": 2,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-http_422-0-57ee2d8a",
+          "status": 200,
+          "elapsed_seconds": 1.797,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 422），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0119"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-http_422-1-a7bf0454",
+          "status": 200,
+          "elapsed_seconds": 1.86,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 422），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0120"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "http_429",
+      "llm_requests": 4,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-http_429-0-24565717",
+          "status": 200,
+          "elapsed_seconds": 4.765,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 429），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0121"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-http_429-1-e8e38e6f",
+          "status": 200,
+          "elapsed_seconds": 4.485,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 429），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0122"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "http_500",
+      "llm_requests": 4,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-http_500-0-d580bae7",
+          "status": 200,
+          "elapsed_seconds": 4.578,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 500），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0123"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-http_500-1-adcfc078",
+          "status": 200,
+          "elapsed_seconds": 4.703,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 500），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0124"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "http_503",
+      "llm_requests": 4,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-http_503-0-7533f202",
+          "status": 200,
+          "elapsed_seconds": 4.766,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 503），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0125"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-http_503-1-7cb2d1db",
+          "status": 200,
+          "elapsed_seconds": 4.937,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（接口返回错误码 503），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0126"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "slow",
+      "llm_requests": 6,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-slow-0-e42c20d0",
+          "status": 200,
+          "elapsed_seconds": 23.547,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0127"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-slow-1-43b9468f",
+          "status": 200,
+          "elapsed_seconds": 22.875,
+          "error": null,
+          "body": {
+            "answer": "这是预检假模型的固定回答，具体数值请以工具结果为准。",
+            "answer_type": "data",
+            "citations": [],
+            "data_evidence": [
+              {
+                "tool": "query_metrics",
+                "params": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28"
+                },
+                "result": {
+                  "start": "2026-06-01",
+                  "end": "2026-06-28",
+                  "store_id": null,
+                  "product_id": null,
+                  "net_revenue": 147211.0,
+                  "refund_amount": 839.0,
+                  "orders": 4049,
+                  "aov": 36.36,
+                  "qty": 6092
+                }
+              },
+              {
+                "tool": "daily_metrics",
+                "params": {
+                  "start": "2026-07-01",
+                  "end": "2026-07-28"
+                },
+                "result": {
+                  "days": [
+                    {
+                      "date": "2026-07-01",
+                      "net_revenue": 4292.0,
+                      "orders": 127,
+                      "aov": 33.8
+                    },
+                    {
+                      "date": "2026-07-02",
+                      "net_revenue": 4924.0,
+                      "orders": 128,
+                      "aov": 38.47
+                    },
+                    {
+                      "date": "2026-07-03",
+                      "net_revenue": 5072.0,
+                      "orders": 134,
+                      "aov": 37.85
+                    },
+                    {
+                      "date": "2026-07-04",
+                      "net_revenue": 7345.0,
+                      "orders": 192,
+                      "aov": 38.26
+                    },
+                    {
+                      "date": "2026-07-05",
+                      "net_revenue": 7504.0,
+                      "orders": 193,
+                      "aov": 38.88
+                    },
+                    {
+                      "date": "2026-07-06",
+                      "net_revenue": 5140.0,
+                      "orders": 127,
+                      "aov": 40.47
+                    },
+                    {
+                      "date": "2026-07-07",
+                      "net_revenue": 4428.0,
+                      "orders": 127,
+                      "aov": 34.87
+                    },
+                    {
+                      "date": "2026-07-08",
+                      "net_revenue": 4531.0,
+                      "orders": 124,
+                      "aov": 36.54
+                    },
+                    {
+                      "date": "2026-07-09",
+                      "net_revenue": 4843.0,
+                      "orders": 133,
+                      "aov": 36.41
+                    },
+                    {
+                      "date": "2026-07-10",
+                      "net_revenue": 4389.0,
+                      "orders": 123,
+                      "aov": 35.68
+                    },
+                    {
+                      "date": "2026-07-11",
+                      "net_revenue": 6409.0,
+                      "orders": 189,
+                      "aov": 33.91
+                    },
+                    {
+                      "date": "2026-07-12",
+                      "net_revenue": 6822.0,
+                      "orders": 199,
+                      "aov": 34.28
+                    },
+                    {
+                      "date": "2026-07-13",
+                      "net_revenue": 5396.0,
+                      "orders": 134,
+                      "aov": 40.27
+                    },
+                    {
+                      "date": "2026-07-14",
+                      "net_revenue": 5371.0,
+                      "orders": 130,
+                      "aov": 41.32
+                    },
+                    {
+                      "date": "2026-07-15",
+                      "net_revenue": 4160.0,
+                      "orders": 126,
+                      "aov": 33.02
+                    },
+                    {
+                      "date": "2026-07-16",
+                      "net_revenue": 4824.0,
+                      "orders": 134,
+                      "aov": 36.0
+                    },
+                    {
+                      "date": "2026-07-17",
+                      "net_revenue": 4955.0,
+                      "orders": 128,
+                      "aov": 38.71
+                    },
+                    {
+                      "date": "2026-07-18",
+                      "net_revenue": 7170.0,
+                      "orders": 192,
+                      "aov": 37.34
+                    },
+                    {
+                      "date": "2026-07-19",
+                      "net_revenue": 6785.0,
+                      "orders": 194,
+                      "aov": 34.97
+                    },
+                    {
+                      "date": "2026-07-20",
+                      "net_revenue": 4319.0,
+                      "orders": 128,
+                      "aov": 33.74
+                    },
+                    {
+                      "date": "2026-07-21",
+                      "net_revenue": 4574.0,
+                      "orders": 132,
+                      "aov": 34.65
+                    },
+                    {
+                      "date": "2026-07-22",
+                      "net_revenue": 4480.0,
+                      "orders": 132,
+                      "aov": 33.94
+                    },
+                    {
+                      "date": "2026-07-23",
+                      "net_revenue": 4796.0,
+                      "orders": 132,
+                      "aov": 36.33
+                    },
+                    {
+                      "date": "2026-07-24",
+                      "net_revenue": 2053.0,
+                      "orders": 52,
+                      "aov": 39.48
+                    },
+                    {
+                      "date": "2026-07-25",
+                      "net_revenue": 6821.0,
+                      "orders": 190,
+                      "aov": 35.9
+                    },
+                    {
+                      "date": "2026-07-26",
+                      "net_revenue": 6693.0,
+                      "orders": 191,
+                      "aov": 35.04
+                    },
+                    {
+                      "date": "2026-07-27",
+                      "net_revenue": 4799.0,
+                      "orders": 130,
+                      "aov": 36.92
+                    },
+                    {
+                      "date": "2026-07-28",
+                      "net_revenue": 5211.0,
+                      "orders": 131,
+                      "aov": 39.78
+                    }
+                  ]
+                }
+              },
+              {
+                "tool": "payment_mix",
+                "params": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28"
+                },
+                "result": {
+                  "start": "2026-08-01",
+                  "end": "2026-08-28",
+                  "store_id": null,
+                  "total_orders": 4045,
+                  "total_net_revenue": 142831.0,
+                  "payments": {
+                    "会员储值": {
+                      "orders": 788,
+                      "qty": 1183,
+                      "net_revenue": 27026.0,
+                      "share_orders": 0.194808,
+                      "share_revenue": 0.189217
+                    },
+                    "微信": {
+                      "orders": 798,
+                      "qty": 1219,
+                      "net_revenue": 28462.0,
+                      "share_orders": 0.197281,
+                      "share_revenue": 0.19927
+                    },
+                    "支付宝": {
+                      "orders": 810,
+                      "qty": 1216,
+                      "net_revenue": 28688.0,
+                      "share_orders": 0.200247,
+                      "share_revenue": 0.200853
+                    },
+                    "现金": {
+                      "orders": 834,
+                      "qty": 1291,
+                      "net_revenue": 29629.0,
+                      "share_orders": 0.20618,
+                      "share_revenue": 0.207441
+                    },
+                    "银行卡": {
+                      "orders": 815,
+                      "qty": 1265,
+                      "net_revenue": 29026.0,
+                      "share_orders": 0.201483,
+                      "share_revenue": 0.203219
+                    }
+                  }
+                }
+              }
+            ],
+            "trace_id": "t-20260901-0128"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "hang",
+      "llm_requests": 2,
+      "attempts": [
+        {
+          "question": "你们的退款规则是怎么规定的？",
+          "session_id": "preflight-hang-0-3c56fb59",
+          "status": 200,
+          "elapsed_seconds": 21.703,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（调用超时），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0129"
+          }
+        },
+        {
+          "question": "最近一段时间的整体经营情况怎么样？",
+          "session_id": "preflight-hang-1-5fbc925c",
+          "status": 200,
+          "elapsed_seconds": 21.75,
+          "error": null,
+          "body": {
+            "answer": "模型服务这次没有正常返回（调用超时），为了不给出没有依据的数字，这个问题先不回答。可以稍后重试；失败的真实原因记在 trace 里。",
+            "answer_type": "refusal",
+            "citations": [],
+            "data_evidence": [],
+            "trace_id": "t-20260901-0130"
+          }
+        }
+      ]
+    }
+  ],
+  "startup_requests": 0
+}

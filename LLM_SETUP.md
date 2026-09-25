@@ -156,30 +156,81 @@ python eval/llm_gateway.py proxy --upstream https://api.deepseek.com --log llm_t
 
 ## 7. 自测结果
 
-### 7.1 `preflight` 输出
+### 7.1 `preflight` 输出（**P1–P14 全部通过**）
 
-_待 P3 回填。_ 计划：
+运行命令（本机没有可用的真实 Key，所以用 `eval/llm_gateway.py` 自带的假模型服务；
+它按 DeepSeek 文档行为模拟，不花钱、不需要 Key）：
 
 ```bash
-python eval/llm_gateway.py preflight --service-url http://localhost:8000
-# 按它打印的提示用它给出的 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 重启服务，再回车
+# 终端 A：起你的服务，环境变量指向假模型
+cd starter
+LLM_BASE_URL=http://127.0.0.1:8901/ds-gw \
+LLM_API_KEY=preflight-key-3b9c1f \
+LLM_MODEL=preflight-model-7f3a \
+.venv/Scripts/python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000
+
+# 终端 B
+python eval/llm_gateway.py preflight --service-url http://localhost:8000 \
+    --port 8901 --model preflight-model-7f3a --api-key preflight-key-3b9c1f \
+    --prefix /ds-gw
 ```
 
-会在 P3 同时做两件事：
-1. 用 `eval/llm_gateway.py fake` 起假模型服务，把 preflight 的 16 个场景
-   （normal / thinking_starved / empty_content / json_empty / bad_tool_args /
-   content_filter / insufficient_resource / aborted / http_401/402/422/429/500/503 /
-   slow / hang）逐条写成红测试，每条断言"HTTP 200 + 合法 JSON + 思考内容不进 answer +
-   真实原因入 trace"；
-2. 用真实 DeepSeek Key 跑一遍 `proxy`，把请求与响应存档作为可观察性证据。
+实测输出（完整原文见 `eval/_preflight/preflight_report.md`）：
 
-### 7.2 异常三类怎么验证（契约 §7.4 第 7 节）
+```
+编号  检查项                                                            结果  说明
+----------------------------------------------------------------------------------
+P1    服务确实把请求发到了注入的 LLM_BASE_URL（含路径前缀）             通过  共观察到 60 次 POST /ds-gw/chat/completions。
+P2    请求里的 model 等于注入的 LLM_MODEL                               通过  全部请求都用了 preflight-model-7f3a。
+P3    注入的 Key 以 Authorization: Bearer 发送                          通过  全部请求都带了正确的 Bearer Key。
+P4    只用了 DeepSeek 文档列出的顶层参数                                通过  只出现了 DeepSeek 文档列出的顶层参数。
+P5    max_tokens 不设，或不小于 2048                                    通过  max_tokens 都不小于 2048。
+P6    没有访问 {prefix}/chat/completions 之外的任何路径                 通过  只访问了 POST /ds-gw/chat/completions。
+P7    工具定义规范，且每一个工具调用都以 role=tool + tool_call_id 回传  通过  44 个工具调用的结果都正确回传了。
+P8    每个场景下 /api/chat 都返回 HTTP 200 与字段完整的合法 JSON        通过  32 次问答全部返回 200 和字段完整的 JSON。
+P9    模型不可用时给出结构化 refusal，answer 从不是空串                 通过  模型不可用的场景下都给了结构化 refusal。
+P10   思考内容没有漏进 answer / citations / data_evidence               通过  32 次回答里，思考标记都没出现在任何对外字段里。
+P11   /api/chat 在时限内返回（含长时间无响应的场景）                    通过  最慢的一次是 23.55 秒，都在 180 秒以内。
+P12   注入环境变量后 /api/health 报告 llm_mode = live                   通过  llm_mode = live。
+P13   多轮工具调用之间 reasoning_content 原样回传（没有触发 400）       通过  18 次多轮请求都原样回传了 reasoning_content。
+P14   保持连接的空行与 SSE 注释没有把服务弄坏                           通过  slow 场景照常给出回答。
 
-| 异常 | 怎么造 | 期望 |
+预检通过：在 OpenAI 兼容这条路线上，我们能原样接上你的服务。
+```
+
+**两条必须说明的事（否则这份输出会被误读）：**
+
+1. **假模型的 `model` 名与 Key 是我们自己指定的**，不是 DeepSeek 的真实值。
+   预检检查的是"服务有没有原样用注入的值"，不是"值对不对"。
+   换成你们的三件套不需要改代码——见第 3 节。
+2. **本机没有可用的真实 DeepSeek Key**，所以这份输出是**假模型**下的结果，
+   不是真实模型下的作答质量。这一点在 `EVAL_REPORT.md` §3 里也写明了：
+   最终得分是 **无 Key 的 mock 降级模式**跑出来的（88.00/100）。
+
+### 7.2 preflight 修掉的三处（以及一处踩坑说明）
+
+| 检查项 | 原来为什么不过 | 怎么修的 |
 |---|---|---|
-| 空回答 | `llm_gateway.py fake` 的 `empty_content` / `json_empty` 场景 | `/api/chat` 200 + `answer_type=refusal`，trace 记 `empty_content` |
-| 超时 | `fake` 的 `hang` 场景（连接建立但永不响应） | read timeout 独立于 connect timeout，到点返回结构化 refusal，不挂起 |
-| 报错 | `fake` 的 `http_401/402/422/429/500/503` 场景 | 每种都 200 + refusal，trace 记真实状态码；429/500/503 先重试一次 |
+| **P1 / P12** | 服务没按注入的 `LLM_BASE_URL` 发请求，或者没重启 | 不是代码问题：`LLM_BASE_URL` 必须**原样含路径前缀**转发（`config.py` 只做 `strip` 和去尾斜杠，不补 `/v1`、不截路径），且改完要**重启**服务 |
+| **P9** | `finish_reason` 为 `length`/`content_filter`/`insufficient_system_resource`/`aborted` 时，以及"没有 `tool_calls` 而 `content` 为空"时，被当成正常回答 | 这四类一律按错误处理 → 结构化 refusal；`live` 模式的异常**不再回退到本地模板回答**（回退会让 `answer_type` 变成 `data`，P9 就是因为这个判红） |
+| **P14 / P13** | — | 本来就对：空行与 `: keep-alive` 注释走 `_strip_noise()` 跳过；assistant 消息**整条原样回传**（含 `reasoning_content`） |
+
+> **踩坑记录（现场调试会问）**：第一次跑 preflight 时 P1 红而 P12 绿，
+> 看起来自相矛盾。原因是**预检自己的假模型没能绑上端口**——我先手动起了一个假模型
+> 占着 8901，预检再起一个时绑定失败，但它的提示信息照打"假模型已启动"。
+> 于是预检统计到的请求数是 0，而我的服务确实在往那个端口发请求。
+> 怎么确认的：**把假模型停掉再问一次**，服务返回了
+> "模型服务这次没有正常返回（接口返回错误码 502）"——这条 refusal 反证了
+> 服务真的在调它。把端口腾出来重跑，P1 立刻通过。
+> 教训：**"两项表现矛盾"时先怀疑观测手段，不要先怀疑被测对象。**
+
+### 7.3 异常三类怎么验证（契约 §7.4 第 7 节）
+
+| 异常 | 怎么造 | 实测结果 |
+|---|---|---|
+| 空回答 | `fake --scenario empty_content` / `json_empty` | `/api/chat` 返回 200 + `answer_type=refusal`，trace 记 `empty_content` |
+| 超时 | `fake --scenario hang`（连接建立但永不响应） | read timeout 独立于 connect timeout，到点返回结构化 refusal，不挂起（P11 实测最慢 23.55 秒） |
+| 报错 | `fake --scenario http_401/402/422/429/500/503` | 每种都 200 + refusal，trace 记真实状态码；429/500/503 先重试一次 |
 
 ---
 
@@ -187,17 +238,22 @@ python eval/llm_gateway.py preflight --service-url http://localhost:8000
 
 清楚但还没解决的，一并写在这里。
 
-1. **trace 里的提示词被截断到 4000 字**（`llm.py:184-186` 的 `_preview`）。
-   契约 §6 要求完整提示词与模型原始输出。**P3 修**：完整留存，体积大就写文件、trace 存路径。
-2. **流式输出还没做**（契约 §7.3 最后一行）。当前 `/api/chat` 是非流式；
+1. **本机没有可用的真实 DeepSeek Key**，所以第 7 节的自测是**假模型**下的结果，
+   `EVAL_REPORT.md` §3 的 88.00 分也是**无 Key 的 mock 降级模式**跑出来的。
+   代码路径、参数、错误处理都按契约 §7.3 对齐并过了预检（P1–P14），
+   但"真实模型下的作答质量"这一项我们没有数据。
+2. **流式输出还没做**（契约 §7.3 最后一行）。`/api/chat` 目前是非流式，
    `delta.reasoning_content` → `delta.content` 的顺序处理、前端"思考中"状态都在 P4。
    预检里与流式有关的项会显示"未检查"而不是"通过"。
-3. **`CHAT_BUDGET` 默认 150 秒**，不是契约的 180 秒上限。留了 30 秒余量；
-   如果 P3 实测发现思考 + 多轮工具调用吃紧，会调到贴近 180 秒并在这里更新。
-4. **思考模式开关未显式设置**。契约 §7.3 允许自己决定并说明理由；
-   `deepseek-flash` 默认开思考。**当前计划：保持开启**（规划更稳、多轮工具调用更可靠），
-   理由会写进 README；对应的代价是更慢、更贵，以及必须把 assistant 消息连同
-   `reasoning_content` 整条回传（`llm.py:43` 的 `LLMReply.message` 已经是这个设计）。
-5. **`tools` 声明里的工具集会在 P3 从 5 个扩到 11 个**，届时本节与第 1 节的工具描述同步更新。
-6. **`temperature` / `presence_penalty` / `frequency_penalty` 不发**——思考模式下不生效，
-   发了只会让"兼容参数"这条预检项变红。数字一律由代码从工具结果渲染，不靠模型确定性。
+3. **`CHAT_BUDGET` 默认 150 秒**，不是契约的 180 秒上限，留了 30 秒给响应序列化。
+   预检 P11 实测最慢 23.55 秒（含 `hang` 场景的 read 超时），离上限很远。
+4. **live 模式下模型回答里的数字会被校验**：凡涉及经营数字必须与工具结果同源，
+   不一致就回退到按工具结果渲染的模板回答。这个回退是**保守**的——
+   宁可措辞死板，也不给未经验证的数字。
+5. **思考模式开关未显式设置**（`deepseek-flash` 默认开启），理由见 README：
+   多轮工具调用更稳，代价是更慢更贵；`reasoning_content` 只进 trace，不进 answer。
+6. **`max_tokens` 显式 4096**（契约要求不设或不小于 2048）。
+7. **`tool_choice: "auto"` 是唯一带上的非必需参数**，预检 P4 判定它在
+   DeepSeek 文档列出的顶层参数之内。若你们那边有异议，删掉它不影响功能。
+8. **trace 里超过 256KB 的字段会写文件、trace 存路径**（`var/llm_payloads/`）。
+   正常一轮提示词只有几 KB，不会触发。
