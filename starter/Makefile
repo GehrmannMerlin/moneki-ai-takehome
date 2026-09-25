@@ -19,7 +19,7 @@ TOP    ?= ..
 
 export DATA_DIR KB_DIR VAR_DIR LLM_BASE_URL LLM_API_KEY LLM_MODEL
 
-.PHONY: help setup rebuild run test eval baseline clean
+.PHONY: help setup rebuild run test eval baseline regression clean
 
 help:            ## 列出所有可用目标
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -45,6 +45,9 @@ eval:            ## 跑公开题库（需要服务已在跑）
 
 baseline:        ## 跑公开题库并按 category 分解成 baseline_report.json
 	$(PY) scripts/baseline_report.py --base-url http://localhost:$(PORT)
+
+regression:      ## 评测即回归：pytest → 起服务 → 题库 → 与基线分类对比
+	$(PY) scripts/regression.py $(if $(QUESTIONS),--questions $(QUESTIONS),)
 
 clean:           ## 删掉清洗表与索引缓存
 	$(PY) -c "import shutil; [shutil.rmtree(p, ignore_errors=True) for p in ('var', '.cache')]"
