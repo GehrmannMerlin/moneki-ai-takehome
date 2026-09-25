@@ -110,20 +110,25 @@ def table_exists(db: Path, name: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # P2 检索层夹具
+#
+# 复现阶段指向 starter 老实现（`kbqa.loader` / `kbqa.index` / `kbqa.retriever`）；
+# 新核心（`kbqa.core.*`）落地后改指新实现——同一批断言，先红后绿。
 # ---------------------------------------------------------------------------
 
-def build_index(kb_dir: Path = KB_DIR):
-    """按当前实现加载知识库并建索引（复现阶段指向 starter 老实现）。"""
-    from kbqa.index import build_index as _build
+#: 复现阶段 = starter 老实现；新核心落地后改成 "kbqa.core"。
+SEARCH_PACKAGE = "kbqa.core"
 
-    return _build(kb_dir)
+
+def build_index(kb_dir: Path = KB_DIR):
+    """按当前实现加载知识库并建索引。"""
+    module = __import__("%s.index" % SEARCH_PACKAGE, fromlist=["build_index"])
+    return module.build_index(kb_dir)
 
 
 def load_documents(kb_dir: Path = KB_DIR):
     """按当前实现加载知识库，返回（文档列表, warnings）。"""
-    from kbqa.loader import load_knowledge_base
-
-    return load_knowledge_base(kb_dir)
+    module = __import__("%s.loader" % SEARCH_PACKAGE, fromlist=["load_knowledge_base"])
+    return module.load_knowledge_base(kb_dir)
 
 
 @pytest.fixture(scope="session")
@@ -146,9 +151,8 @@ def index():
 def retriever(index):
     from datetime import date
 
-    from kbqa.retriever import Retriever
-
-    return Retriever(index, date(2026, 9, 1))
+    module = __import__("%s.retriever" % SEARCH_PACKAGE, fromlist=["Retriever"])
+    return module.Retriever(index, date(2026, 9, 1))
 
 
 @pytest.fixture(scope="session")
