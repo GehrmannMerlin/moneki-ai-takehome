@@ -110,6 +110,25 @@ def apply_intent(plan, intent: Intent, data_period: dict):
 
     planner_intent = plan.intent
 
+    # **planner 已经判定成"两期对比"（kind=compare）时，不要用意图复核去覆盖它。**
+    #
+    # 追问还原出来的 `standalone` 是拼接产物，形如
+    # `这两个月差了多少？是涨还是跌 那8月`——**句子里没有指标词**，
+    # 分类器因此判成 doc。但 planner 那边有更硬的证据：
+    # 它找到了两个时间窗、并且句子里有涨跌词，所以判了 `compare`。
+    # 指标没写就按净营业额比（planner 本来就是这么做的）。
+    #
+    # T01「这两个月的**客单价**差了多少」之所以一直没暴露这个问题，
+    # 是因为它还带着"客单价"这个指标词，分类器刚好能判对。
+    # 这是我自己加的意图复核引入的回归，靠自补题库 X08 才撞出来。
+    if plan.kind == "compare":
+        plan.slots["intent_confidence"] = intent.confidence
+        plan.slots["intent_hints"] = intent.hints
+        plan.slots["intent_recheck"] = {"planner": planner_intent,
+                                        "final": plan.intent,
+                                        "note": "planner 已判定两期对比，保留其结论"}
+        return plan
+
     # `off_range()` 是在**意图复核之前**跑的，它拦的是"问句里确实写了区间外月份"
     # 那一类。这里要处理的是另一半：planner 把"现在"误当成时间窗，
     # 于是 `out_of_period` 变成拒答（"现在周五营业到几点"）。
