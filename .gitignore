@@ -13,6 +13,7 @@ eval/_verify_raw/
 eval/_baseline_raw/
 eval/_preflight/
 eval/_regression_raw/
+eval/_*_raw/
 eval/_*_check/
 eval/_*_extra/
 eval/report.md
