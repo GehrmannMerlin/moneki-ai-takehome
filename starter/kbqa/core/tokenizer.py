@@ -41,6 +41,12 @@ def init_jieba(extra_words=()) -> None:
 
     `extra_words` 传别名表里的全部写法（含数据库写法），
     保证 `牛肉poke` / `味噌拉面` / `Makai Poke` 不被切碎。
+
+    **调用顺序很重要**：必须先把词典挂完，再让任何文本走 `tokenize()`。
+    jieba 的 `add_word` 是**全局且累积**的——每加一个词都会改变**之后**
+    所有文本的切分结果。所以"先切一段、再加词、再切一段"会让两段文本
+    按不同词典切分，索引也就不可复现了（实测踩到过：
+    先建索引得到 `哪`/`种`，再建一次得到 `哪种`）。
     """
     global _initialised
     import jieba
@@ -53,6 +59,30 @@ def init_jieba(extra_words=()) -> None:
         # 触发词典加载（0.5 秒左右），把它挪到启动期而不是首个请求
         jieba.lcut("预热")
         _initialised = True
+
+
+def prime_from_texts(texts) -> None:
+    """把一批文本切一遍，把切出来的词回灌进 jieba 词典。
+
+    **当前没有在用**（`build_index` 不再调它），保留下来是为了写清楚为什么不能用：
+    jieba 的 `add_word` 会改变后续切分，于是"扫正文→加词→再扫"是一个
+    正反馈：第一遍得到 `哪`/`种`，回灌之后第二遍得到 `哪种`，再加进去，
+    第三遍又不一样。实测连跑三次 postings 规模是 2918 / 2919 / 2922，不收敛。
+
+    正确的做法是**不想让分词可复现，而是让索引不依赖分词状态**：
+    把切分结果冻结进 `Chunk.tokens` 随索引落盘（见 `core/chunker.py`）。
+    词典只挂别名词典（KB-003 那种成文登记），不扫正文。
+    """
+    import jieba
+
+    seen: set[str] = set()
+    for text in texts or ():
+        for token in jieba.lcut(normalise(text)):
+            token = token.strip()
+            if len(token) >= 2 and not _PUNCT.match(token):
+                seen.add(token)
+    for token in seen:
+        jieba.add_word(token, freq=100000)
 
 
 def tokenize(text: str) -> list[str]:

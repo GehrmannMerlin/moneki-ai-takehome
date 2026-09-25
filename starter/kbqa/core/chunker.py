@@ -55,6 +55,12 @@ class Chunk:
     heading: str = ""
     kind: str = "text"
     table_header: list[str] = field(default_factory=list)
+    #: 入库时切好的词，随索引一起落盘。
+    #: **为什么要存**：jieba 的 `add_word` 是全局累积的，同一个知识库在不同
+    #: 词典状态下 `lcut` 结果会不一样（实测：先切得到 `哪`/`种`，加了词之后
+    #: 得到 `哪种`）。如果从缓存重建 postings 时重新分词，索引就不可复现。
+    #: 把它存下来，"检索用的词"就只由**落盘那一刻**决定，与运行时的词典无关。
+    tokens: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -65,6 +71,7 @@ class Chunk:
             "heading": self.heading,
             "kind": self.kind,
             "table_header": self.table_header,
+            "tokens": self.tokens,
         }
 
 

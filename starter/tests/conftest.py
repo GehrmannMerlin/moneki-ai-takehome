@@ -76,12 +76,23 @@ def tmp_var(tmp_path, monkeypatch) -> Path:
 FAKE_TEXT = "退款政策 v2 > 三、时限：外卖订单在订单送达后 24 小时内可以申请退款。"
 
 
-@pytest.fixture(scope="session")
-def client(tmp_path_factory):
-    """接口冒烟用的 TestClient：检索整个换成固定返回，不起真实索引。"""
+@pytest.fixture()
+def client(tmp_path):
+    """接口冒烟用的 TestClient：检索换成固定返回，不起真实索引。
+
+    **只在测试期间替换，退出时还原。** 原先这个夹具直接把
+    `Retriever.search` 换掉、不还原，于是它一旦跑过，**整个测试会话里
+    所有检索都变成这个固定返回**——别的测试文件如果也建了索引，
+    断言就会在"测替身"上失败（实测踩到：`tests/test_index_cache.py`
+    单跑 12 passed，全量跑 3 failed，报"top-5 里缺少 KB-029"，
+    拿到的却是 `['KB-013']`，正是这里写死的那个 doc_id）。
+
+    这是个**测试隔离**问题，不是产品代码问题；但它会让整份测试报告不可信，
+    所以在这里修掉。
+    """
     import os
 
-    os.environ["VAR_DIR"] = str(tmp_path_factory.mktemp("var"))
+    os.environ["VAR_DIR"] = str(tmp_path / "var")
     for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
         os.environ.pop(key, None)
 
@@ -108,8 +119,12 @@ def client(tmp_path_factory):
             coverage=1.0,
         )
 
+    original = retriever_module.Retriever.search
     retriever_module.Retriever.search = fake_search
-    return TestClient(server.app)
+    try:
+        yield TestClient(server.app)
+    finally:
+        retriever_module.Retriever.search = original
 
 
 @pytest.fixture(scope="session")

@@ -34,13 +34,15 @@
 | 12 | 检索 | `retriever.py:275-276` | `hit.doc_id` 用排序位置覆写真实 doc_id | **✅ P2 已闭环** |
 | 13 | 检索 | `retriever.py:306-307` | 先取 top_k 再过滤已废止版本 | **✅ P2 已闭环** |
 | 13b | 检索 | `loader.py:61-76` + `retriever.py:120` | **元数据键名对不上（`state` vs `status`），版本过滤整条失效** | **✅ P2 已闭环（排查中新发现）** |
+| 13c | 检索 | `core/index.py::from_json` | **从缓存重建索引时丢掉分词结果；jieba 词典全局累积使索引不可复现** | **✅ P2 已闭环（收尾时发现）** |
 | 14 | 会话 | `sessions.py:16-28` | `_turns` 全局单链表，`session_id` 被忽略 | 待 P3 |
 | 15 | 文档 | `HANDOVER.md` | 交接文档三处与代码不符 | 待 P2（已在 README 更正） |
 
-> **缺陷 #1–#4 在 P1 闭环，#5–#13 与 #13b 在 P2 闭环**，
-> 13 条闭环记录已满足"≥12 条"的出口标准。
+> **缺陷 #1–#4 在 P1 闭环，#5–#13 与 #13b/#13c 在 P2 闭环**，
+> 14 条闭环记录已满足"≥12 条"的出口标准。
 > 每条「根因」里的行号指的是**已被取代的旧文件**——这是刻意保留的：
 > 现场调试环节要能说清"我当时是在哪一行看出来的"。
+> #13b 与 #13c 是**原始缺陷清单里没有的**，都是写测试／对数据时挖出来的。
 >
 > `starter/.cache/index.json` 被提交进仓库（缺陷 #11 的另一半，同一处根因）已在
 > `3ab5d16` 删除，`.gitignore` 同时补上 `.cache/` 与 `var/`。
@@ -269,6 +271,20 @@ def content_key(kb_dir: Path) -> str:
 | **根因** | `starter/kbqa/loader.py:65`（写 `state`）与 `starter/kbqa/retriever.py:120`（读 `status`）**不在同一个字段名上**。两处单独看都没毛病，合起来让整条版本过滤逻辑静默失效——没有报错、没有告警，只是所有旧版本都当现行用。 |
 | **修复** | `b612b04`（`core/loader.py::Document.meta()` 两个键都提供：`status` 是权威键，`state` 保留是为了不破坏 starter 里已按 `state` 读的地方，例如 `docfacts`）。 |
 | **回归测试** | `tests/defects/test_d13_topk.py::test_metadata_exposes_status_under_the_key_the_retriever_reads`、`::test_deprecated_docs_declare_status`、`::test_eligibility_rejects_deprecated_versions_as_of_today`、`::test_deprecated_doc_appears_in_filtered_list`、`::test_archived_docs_are_not_filtered`<br>**修复前确实是红的**（前 4 条）。<br>修复后：`as_of=2026-09-01` 下 KB-002/KB-010/KB-012 全部被挡，`filtered` 非空；`status=归档` 的 5 篇周报**不**被挡（归档 ≠ 废止，历史周报仍是资料——这条也单独有测试）。<br>**这是"两份同样的政策都进 top-k"的真正原因**，也是 V 系版本题（6 分）的地基。 |
+
+---
+
+## 缺陷 #13c：从缓存重建索引时丢掉了分词结果【P2 收尾时发现，改动引入的】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | P2 全部改完之后跑公开评测，`retrieval` 是 15/15。**但我另写了一个独立进程的探针**（直接用 `build_index` 建索引、逐条对金标），也是 15/15——两个数字一致，看起来没问题。真正暴露它的是**评测报告里的 R10 明细**：报告显示 R10 的 top-5 是 `['KB-033','KB-060','KB-042','KB-061','KB-022']`，**少了 KB-029**。而同一个查询在我本地进程里跑，top-5 是 `['KB-033','KB-029',...]`。同一个查询、同一份知识库，两个结果。 |
+| **假设** | ① 服务读的是旧索引（**排除**：`kb_docs=35`、`kb_chunks=113`、`index_key` 与 `content_key` 一致）；② 服务与本地进程加载的索引内容不同（**成立**，但要看差在哪）；③ 查询改写不同（**排除**：`/api/retrieve` 不经过规划器）。 |
+| **验证** | 在服务进程内 dump 中间量：`"吞拿鱼三明治" in idx.postings` → **False**，`idx.doc_freq.get("吞拿鱼三明治")` → `None`，而 `idx.aliases.mentions(查询)` 正常返回 `['吞拿鱼三明治']`、`tokenize("吞拿鱼三明治")` 也正常返回整词。**索引里没有这个词，但分词器认得它**——说明 postings 是在分词器还认不出它的时候建出来的。<br>读 `core/index.py` 找到顺序问题：`load_index` 走 `BM25Index.from_json(payload)`，而 `AliasTable` 是在 `from_json` **内部**才从 JSON 还原的，`_prepare_tokenizer(aliases)`（把别名挂进 jieba）却在 `from_json` **返回之后**才调。`BM25Index.__init__` 里的 `_build()` 已经先跑了，用的还是 jieba 默认词典，`吞拿鱼三明治` 被切成 `吞拿鱼`+`三明治`。<br>**为什么本地探针没抓到**：我的探针是"先 `build_index` 再逐条查"，走的是全新建索引那条路，永远不碰 `from_json`。**只有真的从缓存读一次才看得出来。** |
+| **根因** | `starter/kbqa/core/index.py`：`from_json` 里重建 postings 时，jieba 自定义词典尚未挂好。<br>**更本质的根因**：jieba 的 `add_word` 是**全局累积**的，只要"从缓存重建时重新分词"，索引内容就取决于运行时的词典状态。修顺序只是治标——实测把顺序调对之后，同一进程里连跑四次 `build_index` 仍然得到 2918/2919/2922 三种 postings 规模（词典一边加词、切分一边变，正反馈）。 |
+| **修复** | 把**分词结果冻结进索引**：`Chunk` 加 `tokens` 字段，`build_index` 切一次之后写进 chunk 并随索引落盘；`BM25Index._tokens_of` 优先读冻结值，读不到才现算。词典只挂别名词典，不再扫正文回灌（那会形成正反馈，已实测不收敛，`prime_from_texts` 保留但标注了为什么不能用）。<br>修完**缓存往返逐字节一致**：postings 键集合、词频、`chunk.tokens` 全部相同，连读两次也稳定。 |
+| **回归测试** | `tests/test_index_cache.py`（12 条）：postings 键与词频一致、`chunk.tokens` 原样往返、5 个别名词不被切碎、连读两次稳定、三个真实查询在"写下去的那份"与"读回来的那份"上 top-5 相同且命中金标。<br>**修复前确实是红的**：`test_cached_index_has_same_postings`（少 `哪`/`字`/`段`/`派`/`种`）等，以及评测报告里 R10 少 KB-029。 |
+| **教训（值得单独写）** | **"直接建索引"与"从缓存读"是两条不同的代码路径，只测前者会漏掉后者。** 我当时的探针、以及 `retrieval` 15/15 这个数字，都在测前一条路。是"评测报告里的逐题明细与本地探针不一致"这个**矛盾**把我引过去的——如果我只看总分，这次会以"检索 15/15，P2 达标"收尾，而线上跑的其实是降级索引。 |
 
 ---
 

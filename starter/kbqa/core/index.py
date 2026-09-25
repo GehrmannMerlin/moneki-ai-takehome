@@ -89,10 +89,17 @@ class BM25Index:
         self._build()
 
     def _tokens_of(self, chunk: Chunk) -> list[str]:
-        """入库前做一次别名归一：英文邮件里的 Salmon 也带上"三文鱼poke"的词。
+        """这个 chunk 进索引的词。
 
+        **优先用 chunk 上冻结的 `tokens`**（落盘时算好的），只有在没有的时候
+        （例如手工构造的 chunk）才现算。理由见 `Chunk.tokens` 的注释：
+        jieba 的词典是全局累积的，现算会让索引不可复现。
+
+        别名归一在这里做：英文邮件里的 `Salmon` 也要带上"三文鱼poke"的词，
         两边都归一到数据库的写法，中文问句才有机会命中英文文档。
         """
+        if chunk.tokens:
+            return list(chunk.tokens)
         tokens = tokenize(chunk.text)
         lowered = chunk.text.lower()
         for canonical in self.aliases.strict_mentions(chunk.text):
@@ -179,10 +186,15 @@ class BM25Index:
         from .aliases import AliasTable
 
         chunks = [Chunk(**item) for item in payload["chunks"]]
+        aliases = AliasTable.from_json(payload.get("aliases") or {})
+        # 词典要挂上：`_tokens_of` 在没有冻结 tokens 时会现算，
+        # 而 `coverage()` 与查询侧分词都依赖它。
+        # 但**索引内容不依赖它**——postings 只读 `chunk.tokens`（落盘时冻结的）。
+        _prepare_tokenizer(aliases)
         return cls(
             chunks=chunks,
             docs_meta=payload["docs"],
-            aliases=AliasTable.from_json(payload.get("aliases") or {}),
+            aliases=aliases,
             key=payload.get("key", ""),
             warnings=payload.get("warnings") or [],
             texts=payload.get("texts") or {},
@@ -190,7 +202,16 @@ class BM25Index:
 
 
 def build_index(kb_dir: Path, prepare_tokenizer: bool = True) -> BM25Index:
-    """从知识库目录完整重建索引。"""
+    """从知识库目录完整重建索引。
+
+    分词顺序在这里是**关键**：jieba 的 `add_word` 全局累积、会改变后续所有切分，
+    所以必须"先挂完词典 → 再切"。切分结果**冻结进 `Chunk.tokens` 并落盘**，
+    从此索引内容只由落盘那一刻决定，与运行时的词典状态无关。
+
+    词典只挂**别名表**里的写法，不去扫正文回灌——那会形成
+    "加了词→切分变化→又多出新词"的正反馈，两次 build 仍然不稳定（实测过）。
+    正文里的新词由别名词典负责登记（KB-003 就是这么用的）。
+    """
     from .aliases import build_alias_table
 
     documents, warnings = load_knowledge_base(kb_dir)
@@ -198,6 +219,10 @@ def build_index(kb_dir: Path, prepare_tokenizer: bool = True) -> BM25Index:
     if prepare_tokenizer:
         _prepare_tokenizer(aliases)
     chunks = chunk_documents(documents)
+    if prepare_tokenizer:
+        # 结果冻结进 chunk，落盘之后不再重算（`_tokens_of` 优先读它）
+        for chunk in chunks:
+            chunk.tokens = tokens_for_chunk(chunk, aliases)
     docs_meta = {document.doc_id: document.meta() for document in documents}
     texts = {document.doc_id: document.text for document in documents}
     return BM25Index(chunks, docs_meta, aliases, content_key(kb_dir), warnings, texts)
@@ -216,9 +241,21 @@ def _prepare_tokenizer(aliases) -> None:
         words.append(canonical)
         words.extend(names)
     words.extend(aliases.canonical_of.keys())
-    for alias in list(aliases.canonical_of.keys()):
-        words.append(alias)
     init_jieba(words)
+
+
+def tokens_for_chunk(chunk: Chunk, aliases) -> list[str]:
+    """算一个 chunk 进索引的词，并把别名词典的归一扩展开。
+
+    与 `BM25Index._tokens_of` 是同一套规则，抽出来是为了让 `build_index`
+    能在**冻结**阶段用一次，之后所有人都读 `chunk.tokens`。
+    """
+    tokens = tokenize(chunk.text)
+    lowered = chunk.text.lower()
+    for canonical in aliases.strict_mentions(chunk.text):
+        if canonical.lower() not in lowered:
+            tokens.extend(tokenize(canonical))
+    return tokens
 
 
 def save_index(index: BM25Index, path: Path) -> None:
@@ -238,9 +275,8 @@ def load_index(kb_dir: Path, path: Path, rebuild: bool = False) -> BM25Index:
             with Path(path).open(encoding="utf-8") as handle:
                 payload = json.load(handle)
             if payload.get("key") == key and payload.get("version") == INDEX_VERSION:
-                index = BM25Index.from_json(payload)
-                _prepare_tokenizer(index.aliases)
-                return index
+                # from_json 内部会先挂 jieba 词典再重建 postings（见那里的注释）
+                return BM25Index.from_json(payload)
         except (ValueError, KeyError, TypeError):
             pass
     index = build_index(kb_dir)
