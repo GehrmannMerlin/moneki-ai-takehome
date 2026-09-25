@@ -300,6 +300,25 @@ def test_explanation_found_keeps_citations(service):
     assert "KB-020" in cited, "找到了原因的引用被误杀了：%s" % sorted(cited)
 
 
+def test_asof_question_hints_model_to_search_history(service):
+    """D32：as-of 问题必须把"检索历史版本"的提示传给模型（V03 复盘）。
+
+    真实 Key 第五轮复评：模型 8 次检索全空——连"会员储值政策 v1"都精确
+    点名了，但 KB-010 已被 v2 取代，检索闸按 as-of 把它挡在外面；唯一旁路
+    是查询里带 HISTORICAL_WORDS（旧版/当时的规定/被取代…）。mock 模式靠
+    planner 解析出的 plan.as_of 结构化放行；live 引擎从没告诉过模型这件事。
+    """
+    service.chat("asof-hint", "储值充值现在的赠送规则是什么？")
+    plan = service.planner.plan("那 6 月的时候呢？", service.sessions.history("asof-hint"))
+    assert plan.as_of is not None, "前置断言：planner 应从追问解析出 as_of"
+    engine = _engine(service, ScriptedClient([]))
+    messages = engine._initial_messages(plan, [])
+    blob = " ".join(str(m.get("content", "")) for m in messages)
+    assert "旧版" in blob or "当时" in blob, (
+        "as-of 问题没有把'检索历史版本'的提示传给模型——模型不知道要带"
+        "'旧版/当时的规定'这类词，被取代的 KB-010 永远检索不到")
+
+
 def test_tool_loop_exhaustion_forces_final_answer(service):
     """D29：模型连续要工具、永不给正文时，最后一轮必须**不带工具强制作答**。
 
