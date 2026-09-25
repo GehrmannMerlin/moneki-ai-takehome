@@ -31,9 +31,10 @@ WRITES = [
 
 
 def _fresh_tools(db):
-    from kbqa.tools import DataTools
+    from kbqa.core.datatools import DataTools
+    from kbqa.core.metrics import MetricsEngine
 
-    return DataTools(db)
+    return DataTools(MetricsEngine(db))
 
 
 def test_no_writable_sql_channel(legacy_tools):

@@ -80,10 +80,10 @@ TOOLS = [
         ["product_id"],
     ),
     _fn(
-        "run_sql",
-        "在清洗表上执行一条 SQL，工具覆盖不到的查法用这个。",
-        {"sql": {"type": "string", "description": "要执行的 SQL 语句"}},
-        ["sql"],
+        "first_sale_date",
+        "某商品第一次卖出是哪一天，用来锚定「上市第一个月」这类窗口。",
+        {"product_id": _PRODUCT},
+        ["product_id"],
     ),
     _fn(
         "search_kb",
