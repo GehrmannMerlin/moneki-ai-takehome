@@ -19,7 +19,7 @@ TOP    ?= ..
 
 export DATA_DIR KB_DIR VAR_DIR LLM_BASE_URL LLM_API_KEY LLM_MODEL
 
-.PHONY: help setup rebuild run test eval baseline regression clean
+.PHONY: help setup rebuild run test eval baseline regression swaptest clean
 
 help:            ## 列出所有可用目标
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -42,6 +42,9 @@ test:            ## 跑测试
 eval:            ## 跑公开题库（需要服务已在跑）
 	cd $(TOP) && $(PYTHON) eval/run_eval.py --base-url http://localhost:$(PORT) \
 		--questions eval/public_questions.jsonl
+
+swaptest:        ## 换库自验：造变体数据/知识库，验证零写死
+	$(PY) scripts/swap_check.py
 
 baseline:        ## 跑公开题库并按 category 分解成 baseline_report.json
 	$(PY) scripts/baseline_report.py --base-url http://localhost:$(PORT)
