@@ -230,8 +230,20 @@ class DocFacts:
         return unit
 
     def verbatim(self, doc_id: str, quote: str) -> bool:
-        source = re.sub(r"\s+", "", self.index.texts.get(doc_id, ""))
-        return re.sub(r"\s+", "", quote) in source
+        """quote 是不是该文档可见正文里的一段连续文字。
+
+        **必须与评测脚本同构**（`run_eval.py::normalize_doc`）：
+        NFKC → 去掉全部空白（含零宽空格）→ 去掉 `*` `` ` `` `|` `#` `>`。
+
+        starter 这里只做了 `re.sub(r"\\s+", "", ...)`，比评测**宽**：
+        含 `**加粗**` 或表格竖线的 quote 在这里能过、在评测那里过不了——
+        典型的"测试绿了但评测红"。`core.textnorm.normalize_doc` 是同一套规则的
+        唯一实现，两处都调它。
+        """
+        from .core.textnorm import normalize_doc
+
+        source = normalize_doc(self.index.texts.get(doc_id, ""))
+        return normalize_doc(quote) in source
 
     def cite(self, doc_id: str, quote: str) -> Optional[dict]:
         quote = quote.strip()

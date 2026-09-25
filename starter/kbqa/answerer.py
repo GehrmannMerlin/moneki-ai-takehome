@@ -68,13 +68,18 @@ class Answerer(HybridAnswers):
     def _doc_block(self, plan: Plan, result: SearchResult, limit: int = 2) -> tuple[str, list[dict], float]:
         """从检索结果里取事实：返回（正文、引用、置信度）。
 
-        候选句在全部命中文档之间统一排序，分数接近时以生效日期更新的为准——
-        营业时间总表和后来的调整通知会给出互相矛盾的时间，要用新的那一份。
+        **排序以文档级检索分为主、句子级分为次**：
+        哪篇文档该被引用，取决于整篇的相关性（P2 修好的检索是可靠的）；
+        句子级分只用来决定"引这篇的哪一句"。starter 这里只按句子分升序排、
+        取的还是分数最低的那几个——「外卖订单多久内可以申请退款」于是引到了
+        KB-061（发票）和 KB-011（储值），真正答对的 KB-013 因为句子分稍低被排在最后。
         """
         candidates = self._candidates(plan, result, require_value=True)
         if not candidates:
             candidates = self._candidates(plan, result, require_value=False)
-        candidates.sort(key=lambda item: (round(item["score"], 2), item["effective_from"]))
+        candidates.sort(
+            key=lambda item: (-round(item["doc_score"], 3), -round(item["score"], 2),
+                              item["effective_from"]))
         lines: list[str] = []
         citations: list[dict] = []
         used_terms: set[str] = set()
@@ -149,6 +154,8 @@ class Answerer(HybridAnswers):
                     {
                         "score": score * (max(hit.score, 0.0) / top_score) ** 0.5 * estimate_penalty,
                         "raw": score,
+                        #: 文档级检索分：决定"该引哪几篇"，句子分只决定"引这篇的哪一句"
+                        "doc_score": float(hit.score),
                         "doc_id": hit.doc_id,
                         "meta": meta,
                         "unit": unit,
@@ -310,12 +317,30 @@ class Answerer(HybridAnswers):
 
     # -- 纯文档 -----------------------------------------------------------------
 
-    def _context(self, result: SearchResult) -> str:
-        """把命中的那篇文档原样拼进来，答案就在里面，别漏了。"""
+    def _context(self, result: SearchResult, limit: int = 900) -> str:
+        """把命中的那篇文档**相关的那几段**拼进来——不是整篇。
+
+        starter 是 `"\\n".join(chunk.text for chunk in chunks_of(hit.doc_id))`，
+        等于把整篇文档塞进 answer：实测 C05=1407、C06=2748、S03=2709 字，
+        全部超过契约 §5 的 1200 字硬上限。
+
+        现在只取命中 chunk 本身，并且**逐字截取**（quote 校验要和原文一致，
+        所以不能改写、不能拼接），超长就从句末边界往回截。
+        """
         blocks: list[str] = []
-        for hit in result.hits[:1]:
+        budget = limit
+        for hit in result.ranked[:2]:
             for chunk in self.retriever.index.chunks_of(hit.doc_id):
-                blocks.append(chunk.text)
+                if chunk.text != hit.text:
+                    continue                             # 只要命中的那一段
+                text = chunk.text.strip()
+                if len(text) > budget:
+                    text = _truncate_at_sentence(text, budget)
+                blocks.append(text)
+                budget -= len(text)
+                break
+            if budget <= 120:
+                break
         return ("\n".join(blocks) + "\n") if blocks else ""
 
     def _should_refuse(self, plan: Plan, confidence: float, top_score: float) -> Optional[str]:
@@ -351,4 +376,19 @@ class Answerer(HybridAnswers):
                 answer_type="clarify",
                 notes=["检索最高分 %.1f，且问题里没有指标、时间或门店" % top_score],
             )
-        return Answer(answer=self._context(result) + body, answer_type="doc", citations=citations)
+        # **引用正文就是答案**：不要在前面再拼一遍整篇文档。
+        # starter 拼了（`self._context(result) + body`），于是 answer 变成
+        # "整篇原文 + 结论"，超 1200 字上限的题全部判红（D17）。
+        return Answer(answer=body, answer_type="doc", citations=citations)
+
+
+def _truncate_at_sentence(text: str, limit: int) -> str:
+    """从文末的句号/换行处往回截，尽量不留半句话。"""
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    for mark in ("。", "；", "\n", "！", "？"):
+        position = window.rfind(mark)
+        if position >= limit // 2:
+            return window[: position + 1]
+    return window

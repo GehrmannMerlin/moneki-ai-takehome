@@ -249,8 +249,19 @@ class Planner:
             plan.kind, plan.intent = "summary", "data"
 
         # 路由：问“多少/多久/几”的就是要数字，问“为什么/原因”的就是要说法。
-        # 两边都走一遍太慢，没必要。
-        if E.has_any(text, ("多少", "多久", "几")):
+        #
+        # **注意这里只在"取数路线已经成立"时才压低意图**（`may_query`）。
+        # starter 原来是无条件压的：
+        #
+        #     if E.has_any(text, ("多少", "多久", "几")):
+        #         plan.intent = "data"
+        #
+        # 于是「储值充值现在的赠送规则是什么？」先被上面判成 doc（第 228 行
+        # `asks_policy` 分支），又被这里因为句子里有个"多少"压回 data + summary，
+        # 最后答成"知识库里没有该商品的调价通知"。
+        # `may_query` 是前面几行刚算出来的"这个问题真的能查库吗"，
+        # 用它当门刚好把"问规定的多少"排除掉，同时不动"问数字的多少"。
+        if may_query and E.has_any(text, ("多少", "多久", "几")):
             plan.intent = "data"
             if plan.kind in ("doc", "anomaly", "target", "price"):
                 plan.kind = "summary"
