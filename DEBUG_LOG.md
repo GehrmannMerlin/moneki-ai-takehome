@@ -41,14 +41,17 @@
 | 17 | 编排 | `answerer.py::_answer_doc` | **把整篇文档拼进 answer，超契约 1200 字上限** | **✅ P3 已闭环（排查中新发现）** |
 | 18 | 编排 | `entities.py:62` + `answerer` | **安全闸用绝对分数阈值，分词修好后整条失效** | **✅ P3 已闭环** |
 | 19 | LLM | `live.py::_finalise` | **失败的模型输出被当成正常回答（P9 红）** | **✅ P3 已闭环** |
+| 20–23 | 编排 | `answerer` / `intent` / `planner` | H02/H05/H06/C04 的根因（达标压制、支付指标、why 类引用克制、跨语言取数） | **✅ P3 已闭环** |
+| 24 | 环境 | `requirements.txt` | **中文注释让干净环境 `pip install` 直接失败**（P5 自查发现，我自己引入的） | **✅ P5 已闭环** |
 
 > **缺陷 #1–#4 在 P1 闭环，#5–#13 与 #13b/#13c 在 P2 闭环，
-> #14–#19 在 P3 闭环**，合计 **19 条闭环记录**，满足"≥12 条"的出口标准。
+> #14–#23 在 P3 闭环，#24 在 P5 闭环**，合计 **24 条闭环记录**，
+> 满足"≥12 条"的出口标准。
 > 每条「根因」里的行号指的是**已被取代的旧文件**——这是刻意保留的：
 > 现场调试环节要能说清"我当时是在哪一行看出来的"。
-> **#13b、#13c、#16、#17、#18、#19 六条是原始缺陷清单里没有的**，
-> 全部是写测试、对逐题明细、跑预检时挖出来的——这也是这份日志最想展示的东西：
-> 缺陷清单不是一次性抄完的，是边修边长的。
+> **#13b、#13c、#16、#17、#18、#19、#24 七条是原始缺陷清单里没有的**，
+> 全部是写测试、对逐题明细、跑预检、跑干净环境时挖出来的——
+> 这也是这份日志最想展示的东西：**缺陷清单不是一次性抄完的，是边修边长的。**
 >
 > `starter/.cache/index.json` 被提交进仓库（缺陷 #11 的另一半，同一处根因）已在
 > `3ab5d16` 删除，`.gitignore` 同时补上 `.cache/` 与 `var/`。
@@ -348,6 +351,20 @@ def content_key(kb_dir: Path) -> str:
 | **根因** | `starter/kbqa/live.py::_finalise` 的回退路径绕过了错误处理。 |
 | **修复** | `e5a08b5`。模型侧的失败一律抛 `LLMError`（含数字校验失败），由 `_run_engine` 统一转成结构化 refusal，真实原因进 trace。`empty_content` / `json_empty` 两个场景因此从"当成回答"变成 refusal。 |
 | **回归测试** | `eval/llm_gateway.py preflight` 的 P9（16 场景逐条）<br>**修复前确实是红的**：`有 24 处不合规，例如 [empty_content] 把一次失败的模型输出（…）直接当成了回答`<br>修复后 P1–P14 **全部通过**，完整输出贴在 `LLM_SETUP.md` §7 |
+
+---
+
+## 缺陷 #24：`requirements.txt` 里的中文注释让干净环境装依赖失败【P5 自查发现】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 按作业评分流程第 1 步"在干净环境里跑起来"复验时，`pip install -r requirements.txt` **直接失败**：<br>`UnicodeDecodeError: 'gbk' codec can't decode byte 0x80 in position 36: illegal multibyte sequence`<br>`decoding with 'cp936' codec failed` |
+| **假设** | ① 网络/镜像问题（**排除**：错误是解码失败，不是网络）；② 依赖名写错（**排除**：同一个文件在开发用的 `.venv` 里装过）；③ **文件编码问题**（**成立**）。 |
+| **验证** | `Format-Hex` 看字节：`requirements.txt` 里有 UTF-8 的中文（`# P2 检索层：中文分词。…`）。<br>**pip 读 `requirements.txt` 时用系统本地编码**（这台机器 cp936/GBK），不是 UTF-8；文件里出现 UTF-8 中文字节就解析不了。错误信息里 `decoding with 'cp936' codec failed` 已经说得很直白。<br>对照实验：`PYTHONUTF8=1` 之后同一条命令**成功**——证实是编码问题。<br>**为什么开发时没暴露**：开发用的 `.venv` 是早就建好的（依赖齐全），从来没重新跑过 `pip install -r requirements.txt`。"在我机器上能跑"就是这么来的。 |
+| **根因** | P2 给 `requirements.txt` 加了一行中文注释（`jieba` 的说明）。<br>**是我自己引入的**，而且和 `regression.py` 里 `subprocess.run(text=True)` 是**同一个根因**：把中文放进会被非 UTF-8 解码器读的地方（那条已在 `4a30ca8` 修掉）。 |
+| **修复** | `a50d732`。`requirements.txt` 保持**纯 ASCII**，依赖说明挪到 README（给人看的，编码无所谓）。 |
+| **回归测试** | 干净环境三步复验：`py -3.12 -m venv` → `pip install -r requirements.txt`（**退出码 0**）→ `python -m kbqa.rebuild`（35 篇 / 113 块）→ 起服务，**六个接口 + 前端全部 200**：<br>`health: llm_mode=mock kb_docs=35 kb_chunks=113 valid=18290`<br>`metrics/summary: net=156757 orders=4311 aov=36.36`、`metrics/daily: 5 天`<br>`retrieve: 5 条 top1=KB-013`、`chat: type=doc cites=KB-013`、`trace: 7 步 errors=0` |
+| **教训** | **"我机器上能跑"最危险的形式，是"我从来没在干净环境里跑过那一步"。**<br>这道题最终是按"干净环境 + 换库 + 隐藏题库"评的，所以**复现性本身是评分项**（8 分维度里的一条）。<br>要不是把"干净环境三步"真的走了一遍，这个错误会一路带到评委那里——而且是**第 1 步就挂**，后面的分全丢。 |
 
 ---
 

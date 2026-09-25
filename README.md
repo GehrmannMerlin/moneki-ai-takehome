@@ -115,10 +115,19 @@ cd starter && .venv/Scripts/python scripts/baseline_report.py
 | `make test` | 跑 pytest |
 | `make eval` | 跑公开题库 |
 | `make baseline` | 跑公开题库并按类别分解成 `eval/baseline_report.json` |
+| `make regression` | **评测即回归**：一条命令跑「单测 → 起服务 → 题库 → 与 17.00 基线分类对比」，任何一类低于基线就返回 1 |
+| `make swaptest` | **换库自验**：造变体 `data/`+`knowledge_base/`，重建并**真的起服务提问**，验证零写死 |
 | `make clean` | 删掉 `var/` 与 `.cache/` |
 
 `DATA_DIR`、`KB_DIR`、`VAR_DIR`、`TODAY`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`
 都可以直接用环境变量传，`make` 会透传。
+
+> `make regression` 与 `make swaptest` 是第四关"可调试性与回归"的落地，
+> 也正好覆盖评委第 3 步（换库重建）会做的事。不装 `make` 也能直接跑：
+> `starter/.venv/Scripts/python scripts/regression.py` / `scripts/swap_check.py`。
+>
+> **`requirements.txt` 保持纯 ASCII**：pip 读它时用系统本地编码（这台机器是 GBK），
+> 里面放中文会让干净环境装依赖直接失败（详见 `DEBUG_LOG.md` 缺陷 #24）。
 
 ### ⚠️ Windows 上重建前先停服务
 
