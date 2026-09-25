@@ -387,6 +387,58 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+## 缺陷 #20：「达到目标了吗」被"多少"压成普通汇总，达标判定丢失（H02）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | H02「618 当天 S02 的牛肉poke 卖了多少份？达到目标了吗？」回答了销量与引用，但**没有达标结论**，`text_any`（达标/达到目标/完成目标/达成…）判红。 |
+| **假设** | ① 检索没找到 KB-023 的目标句（**排除**：答案里明明引了"当天牛肉poke 目标销量 120 份"）；② 没路由到 `_answer_target`（**成立**）。 |
+| **验证** | 探查 planner：`intent=data kind=summary`。`_choose_kind` 先把 `asks_target` 判成 `target`，紧接着"多少份"触发压低规则（`planner.py` 的 `if may_query and has_any(text, ("多少","多久","几"))`），`kind` 被压回 `summary`——压低名单里显式包含 `target`。 |
+| **根因** | `starter/kbqa/planner.py::_choose_kind` 的压低名单。该规则本意是修"储值充值现在的赠送规则是什么"被误判成 price（那是 `price`，不是 `target`），`target` 属于误伤。 |
+| **修复** | `181382b`。把 `target` 移出压低名单（`doc`/`anomaly`/`price` 保留），`_build_search_query` 同时会补"目标/达标/方案"检索词。 |
+| **回归测试** | `tests/defects/test_hybrid_merge.py::test_target_verdict_kept`、`test_planner_keeps_target_kind`（2 条）<br>**修复前确实是红的**：H02 `text_any` FAIL，实际回答无"达标"字样<br>修复后：H02 3.00/3.00 |
+
+---
+
+## 缺陷 #21：「支付占比」不算指标，"占比是多少+为什么"缺了数据那条腿（H05）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | H05「8 月 3 日 S05 的现金支付占比是多少？为什么会这样？」按纯文档答（`answer_type=doc`），只引 KB-027 标题句，`answer_type_in`/`numbers_all[100.0]`/`evidence_required` 三项全红。 |
+| **假设** | ① `payment_mix` 工具算不出当天数据（**排除**：手算 S05 当天 27 单全现金、占比 100%）；② 意图分类没把支付当指标，hybrid 分支 ② 没进（**成立**）。 |
+| **验证** | `core/intent.classify` 分支 ② 要求 `asks_why and metric and has_time`。探查：`find_metric("现金支付占比")` 返回 None——`METRIC_WORDS` 只有营业额/订单/销量/客单价/退款五类，支付不在其中，于是落到 ⑥（doc，置信度 0.4），`_answer_doc` 只引了 KB-027。 |
+| **根因** | `starter/kbqa/core/intent.py::classify`：支付类词（`PAYMENT_WORDS`）没有被当作指标信号。 |
+| **修复** | `181382b`。`metric_word or find_metric(...)` 为空且命中 `PAYMENT_WORDS` 时按 `payment` 处理；planner 的 `kind=payment` 保留，`apply_intent` 置 `two_part`，`_answer_data` 先算 `payment_mix` 再由 `_cause_block` 引 KB-027。 |
+| **回归测试** | `tests/defects/test_hybrid_merge.py::test_payment_share_why_is_hybrid`、`test_payment_words_count_as_metric`（2 条）<br>**修复前确实是红的**：H05 三项 FAIL（doc / 无 100 / 无 evidence）<br>修复后：H05 3.00/3.00，回答含"现金 27 单、占订单数的 100.00%"+ KB-027 引用 |
+
+---
+
+## 缺陷 #22：why 类没有文档解释时，合并层拿相邻文档硬凑引用（H06）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | H06「S02 在 8 月 17 日到 19 日为什么一分钱营业额都没有？」回答一边说"知识库里没有找到能解释这段时间的通知或说明"，一边又引了 KB-031（门店档案）与 KB-023（618 方案），`cite_max=0` 直接判红。 |
+| **假设** | ① `_cause_block` 误判有解释文档（**排除**：它正确返回了空）；② 后面的 `_merge_doc_side` 又把检索 top 结果引上了（**成立**）。 |
+| **验证** | 意图复核把该题判成 hybrid → `apply_intent` 置 `intent=data + two_part`；`_answer_data` 的 `asks_why` 分支找不到解释文档（正确），但返回后 `_merge_doc_side` 见到 `two_part` 就把 `_doc_block` 的两条相邻文档拼上并提升成 hybrid。设计上 P3 就写了"why 类 + 检索覆盖率低 → 强制清空引用"，但这条规则只长在 `_cause_block` 里，合并层把它绕过去了。 |
+| **根因** | `starter/kbqa/answerer.py::_merge_doc_side`：没有尊重"数据侧已判定无解释文档"这个事实。 |
+| **修复** | `181382b`。`_answer_data` 找不到解释时记 `plan.slots["cause_not_found"]`，`_merge_doc_side` 见到该标记直接返回，不再合并文档侧。 |
+| **回归测试** | `tests/defects/test_hybrid_merge.py::test_why_without_explanation_cites_nothing`<br>**修复前确实是红的**：H06 `cite_max` FAIL，实际 citations `["KB-031","KB-023"]`<br>修复后：H06 3.00/3.00，`citations == []`，数字事实照给 |
+
+---
+
+## 缺陷 #23：跨语言答案句与中文问句零词面重叠，句子级打分永远浮不出（C04/T02）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | C04「供应商最后赔了我们多少钱」与 T02 第 2 轮「供应商后来赔了多少」都引了 KB-021/KB-029，回答里没有 8600，`fact_all{KB-022, 8600}` 与 `cite_all[KB-022]` 红。答案明明在 KB-022 英文邮件里："credit note of CNY 8,600"。 |
+| **假设** | ① 检索没找到 KB-022（**排除**：R04 绿，KB-022 在 top-5 第 3 位）；② 句子级挑句把它漏了（**成立**）。 |
+| **验证** | `_doc_block` 的候选来自 `facts.rank`：按问句词面权重给每句打分，英文句"…credit note of CNY 8,600…"与中文问句**一个词都不重叠**，`hit=0` 直接被跳过。pass1（require_value）全空 → pass2 按词面挑了 KB-021/KB-029 的句子。根因与 R04 是同一个（跨语言），只是检索层当年用别名桥接解决了**文档级**，**句子级**没有对应的桥。 |
+| **根因** | `starter/kbqa/answerer.py::_doc_block`：句子级打分纯词面，跨语言答案句恒为 0 分。 |
+| **修复** | `181382b`。新增 `_value_rescue`：问句期望某种"值的形状"（金额/数量/时长）而候选句都不带它时，按**文档级**相关性直接到命中文档里找带这种值的句子（跳过 `estimates_only` 估算文档），救回的候选排最前参与引用——评测要的是"8600 这个值 + KB-022 这份文档"，两者都由它保证。 |
+| **回归测试** | `tests/defects/test_hybrid_merge.py::test_compensation_amount_from_english_doc`、`test_compensation_followup`、`test_value_rescue_skips_estimates_only`（3 条）<br>**修复前确实是红的**：C04/T02 `fact_all`/`cite_all` FAIL<br>修复后：C04 2.00/2.00、T02 3.00/3.00，公开题库 **100.00 / 100** |
+
+---
+
 ## 附：本文件维护约定
 
 - 每条缺陷在**修复落地**时才填「修复」与红证据；未落地的写"待 PX"。
