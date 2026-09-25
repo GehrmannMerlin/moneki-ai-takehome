@@ -267,11 +267,16 @@ _CAUSE_WORDS = ("原因", "通知", "说明", "解释", "文档", "记录")
 
 
 def _says_no_explanation(text: str) -> bool:
-    match = _NO_FOUND.search(text or "")
-    if not match:
-        return False
-    window = text[max(0, match.start() - 16): match.end() + 16]
-    return any(word in window for word in _CAUSE_WORDS)
+    """正文里**任意一处**"没有找到"族短语附近有因果/说明类词，就算明说。
+
+    必须遍历全部匹配，不能只看第一处：真实回答里"没有任何交易"这类
+    数据事实描述往往先出现，真正带"原因：没有找到"的句子在后面。
+    """
+    for match in _NO_FOUND.finditer(text or ""):
+        window = text[max(0, match.start() - 16): match.end() + 16]
+        if any(word in window for word in _CAUSE_WORDS):
+            return True
+    return False
 
 
 def _question_year(plan: Plan) -> Optional[int]:
