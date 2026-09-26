@@ -90,9 +90,13 @@ def parse_amount_cents(value: object) -> tuple[Optional[int], str]:
 
 
 def parse_qty(value: object) -> Optional[int]:
-    """数量按整数解析。解析不了返回 None。
+    """数量按**严格整数**语义解析（KB-001 §2.4：`qty` 按整数解析）。
 
-    None 或 `<= 0` 都触发剔除规则 3（`3_qty_le_zero`）。
+    * `"3"` / `3` → 3；
+    * `"3.0"` → 3（整数值，Decimal 上与 3 相等，不是截断）；
+    * `"1.5"` / `"2.7"` → None——**真正的小数不允许被 `int()` 静默截断成 1/2**，
+      解析失败即进入清洗剔除规则 3（qty 无效）。
+    * None 或解析出的整数 `<= 0` 同样触发剔除规则 3。
     """
     text = ("" if value is None else str(value)).strip()
     if not text:
@@ -103,6 +107,8 @@ def parse_qty(value: object) -> Optional[int]:
         return None
     if not number.is_finite():
         return None
+    if number != number.to_integral_value():
+        return None                      # 真正的小数：不是整数，不能截断
     try:
         return int(number)
     except (InvalidOperation, OverflowError, ValueError):    # pragma: no cover

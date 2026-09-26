@@ -16,7 +16,7 @@ from .service import Service
 #: 前端构建产物（vite build 的输出，dist 入库，评委零构建启动）。
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="经营看板 + 问答服务", version="0.9.3")
+app = FastAPI(title="经营看板 + 问答服务", version="0.9.4")
 _service: Optional[Service] = None
 
 
@@ -25,6 +25,17 @@ def service() -> Service:
     if _service is None:
         _service = Service()
     return _service
+
+
+@app.on_event("startup")
+async def _boot_check() -> None:
+    """启动期就完成一次初始化。
+
+    R1/D3：clean.db 与当前 data/ 不匹配时 Service() 会抛 RuntimeError。
+    放在 startup 里，uvicorn 进程当场带着明确信息退出，
+    而不是等到第一个请求才 500（评测脚本对 500 的宽容不等于应该 500）。
+    """
+    service()
 
 
 def _as_text(value: Any) -> str:

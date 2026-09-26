@@ -31,6 +31,7 @@ from typing import Iterable, Optional
 from .normalize import norm_id, parse_amount_cents, parse_date, parse_qty
 
 #: 六条剔除规则，顺序即优先级（首因归因）。
+#: 规则 3 覆盖"qty 无法按整数解析（含小数）或 <= 0"两种无效形态（KB-001 §2.4）。
 REMOVAL_REASONS = (
     "1_unparseable_date",
     "2_empty_amount",
@@ -38,7 +39,16 @@ REMOVAL_REASONS = (
     "4_store_not_in_stores",
     "5_product_not_in_products",
     "6_duplicate_row",
+    # KB-001 §4：销售行 amount > 0、退款行 amount < 0——amount=0 两边都不是。
+    # 它不在 §3 的六条剔除里，作为分类阶段的新增原因排在规则 6 之后
+    # （"通过剔除规则后"才谈得上销售/退款分类）。
+    "7_zero_amount",
 )
+
+#: 清洗算法版本：进入数据指纹（manifest.data_fingerprint）。
+#: 语义变化时必须递增，否则换数据后旧 clean.db 会被误判为仍有效。
+CLEANING_VERSION = "clean-v4"       # v4：严格整数 qty + amount=0 不算销售/退款
+SCHEMA_VERSION = "1"
 
 #: v2 口径独有的剔除原因（退款行在 v2 里不计入净营业额）。
 V2_REFUND_EXCLUDED = "v2_refund_excluded"
@@ -180,6 +190,10 @@ def clean_rows(
                 group_seq += 1
                 line.dup_group = group_seq
                 seen[key] = group_seq
+                # KB-001 §4 的分类：通过六条剔除后，amount=0 既不是销售行也不是退款行，
+                # 不得计入 valid_sales_rows / orders / qty / revenue。
+                if line.amount_cents == 0:
+                    reject = "7_zero_amount"
 
         line.reject_v3 = reject
         if reject is not None:

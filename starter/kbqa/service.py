@@ -44,12 +44,24 @@ class Service:
 
     def rebuild(self, only_if_missing: bool = False) -> None:
         settings = self.settings
-        if not only_if_missing or not settings.clean_db.exists():
+        # R1 / D3：clean.db 存在 ≠ 有效。启动时校验它到底是从哪份数据建出来的
+        # （数据指纹 + build_manifest），不匹配就明确要求 rebuild，不静默复用。
+        from .core.manifest import (
+            data_fingerprint, load_manifest, stale_artifact_error, write_manifest,
+        )
+        data_fp = data_fingerprint(settings.data_dir)
+        if only_if_missing and settings.clean_db.exists():
+            manifest = load_manifest(settings.var_dir)
+            stored = (manifest or {}).get("data_fingerprint")
+            if stored != data_fp:
+                raise stale_artifact_error(data_fp, stored)
+        elif not only_if_missing or not settings.clean_db.exists():
             build_clean_db(settings.source_db, settings.clean_db)
         # P1：口径引擎是唯一的指标出口，看板、/api/metrics/*、问答的 data_evidence
         # 三处都走它，所以"口径一致"是结构保证，不是纪律。
         self.engine = MetricsEngine(settings.clean_db)
         self.tools = DataTools(self.engine)
+        # 索引内容寻址：KB 内容变了 key 就变，缓存自动失效（修 D11）
         self.index = load_index(settings.kb_dir, settings.index_path, rebuild=not only_if_missing)
         self.retriever = Retriever(self.index, settings.today)
         self.catalog = Catalog(
@@ -61,6 +73,14 @@ class Service:
             self.tools, self.retriever, self.catalog, settings.today, self.data_period, self.facts
         )
         self.planner = Planner(self.catalog, settings.today, self.data_period, self._scout)
+        # manifest 记录本次进程实际持有的产物来源与统计（全部动态值，无写死）。
+        write_manifest(settings.var_dir, {
+            "data_fingerprint": data_fp,
+            "kb_fingerprint": self.index.key,
+            "valid_sales_rows": self.tools.valid_sales_rows(),
+            "kb_docs": len(self.index.docs_meta),
+            "kb_chunks": len(self.index.chunks),
+        })
 
     def _scout(self, text: str) -> tuple[float, float]:
         """给一句话探底：它的词在知识库里有多少、检索最高分多少。
