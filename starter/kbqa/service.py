@@ -30,6 +30,25 @@ _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _INT_PARAMS = {"top_k", "limit"}
 
 
+def _as_json_object(result):
+    """工具边界的统一契约：LiveEngine 永远收到可检查、可序列化的 JSON object。
+
+    三种语义必须能区分开（R2-D5 / §26）：
+
+    * 工具成功执行且有结果 → ``dict`` 原样（多数数据工具）；
+    * 工具成功执行但结果是个标量（``first_sale_date`` 返回日期字符串）→
+      ``{"value": ...}``；没有查到 → ``{"value": null}``（"成功但没有数据"）；
+    * 工具执行失败 → ``{"error": "..."}``（由 ``run_tool`` 自己构造）。
+
+    历史缺陷：``first_sale_date`` 直接返回 ``str`` / ``None``，而 ``live.py``
+    用 ``"error" not in result`` 判断，于是 ``None`` 触发
+    ``TypeError: argument of type 'NoneType' is not iterable``（MT05 真实复现）。
+    """
+    if isinstance(result, dict):
+        return result
+    return {"value": result}
+
+
 class Service:
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or load_settings()
@@ -155,7 +174,8 @@ class Service:
         try:
             if name == "search_kb":
                 return self.retrieve(cleaned["query"], cleaned.get("top_k", 5))
-            return getattr(self.tools, name)(**cleaned)
+            # R2-D5：标量/None 结果在这里统一成 JSON object，不让 TypeError 冒到 live 循环。
+            return _as_json_object(getattr(self.tools, name)(**cleaned))
         except (TypeError, ValueError) as exc:
             return {"error": "工具 %s 执行失败：%s" % (name, exc)}
         except AttributeError:

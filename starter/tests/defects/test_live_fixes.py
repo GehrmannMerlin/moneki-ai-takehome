@@ -289,10 +289,17 @@ def test_explanation_found_keeps_citations(service):
     别的子句里；主句是"原因是 [KB-020]"时不触发清空。
     """
     plan = service.planner.plan("S03 六月第二周的营业额为什么比别的周低？")
+    # R2（泛化第二轮）：live 的 finaliser 现在要求回答里的数据数字有工具结果支撑
+    # （Fact Ledger 的 canonical receipt）。所以这里先查一次数据库——这也正是真实
+    # 模型在 why 类问题上的行为（数据事实 + 文档解释）。回答里不再复述文档中的
+    # "停业 4 天"（4 不在引用摘句里，会触发一次无谓的 repair）；本测试要验的是
+    # "找到了原因的正确引用不被误杀"，与那处措辞无关。
     client = ScriptedClient([
+        _tool_reply("daily_metrics",
+                    {"start": "2026-06-08", "end": "2026-06-14", "store_id": "S03"}),
         _tool_reply("search_kb", {"query": "S03 停业 通知"}),
         _content_reply(
-            "S03 六月第二周前三天营业额为 0。原因是门店自 6 月 8 日起停业 4 天整改排烟管道 "
+            "S03 六月第二周前三天营业额为 0。原因是门店自 6 月 8 日起停业整改排烟管道 "
             "[KB-020]。"),
     ])
     answer = _engine(service, client).answer(plan, _trace(service, "x"), [])
@@ -329,10 +336,13 @@ def test_tool_loop_exhaustion_forces_final_answer(service):
     "没有找到相关文档"和数据事实用正文说出来。
     """
     #: 前若干轮永远在要工具；强制作答轮（没拿到工具定义）只能给正文。
+    #: R2：措辞里不放数字——没有数据 receipt 时，写了具体数字会触发一次
+    #: finaliser repair，多出一次不带工具的 completion，干扰本测试要验的
+    #: "轮数用尽 → 强制作答"结构。
     script = [_tool_reply("search_kb", {"query": "尝试第%d轮" % i}, seq=i) for i in range(12)]
     client = ScriptedClient(
         script,
-        forced=_content_reply("没有找到解释这种情况的文档；已知数据事实是这几天营业额为 0。"),
+        forced=_content_reply("没有找到解释这种情况的文档；这几天该门店没有任何营业额记录。"),
     )
     plan = service.planner.plan("S02 在 8 月 17 日到 19 日为什么一分钱营业额都没有？")
 

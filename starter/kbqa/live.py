@@ -1,28 +1,43 @@
-"""live 模式：模型通过工具取数和检索，数字仍然由代码渲染。"""
+"""live 模式：模型通过工具取数与检索、组合回答；**事实**与**最终校验**由代码负责。
+
+Generalization Round 2 把这条流水线收敛成两个权威：
+
+* ``FactLedger``（``kbqa/ledger.py``）—— 每一次工具执行登记一条不可变
+  :class:`ToolReceipt`，canonical raw result 就是事实来源；模型看到的
+  ``role=tool`` 内容（model projection）与最终 ``data_evidence``
+  （evidence projection）是它的两个**不同投影**。
+* Finalisation Authority —— 本模块的 ``_finalise``。它只能**验证、选择证据、
+  要求模型修正一次、或安全拒答**，绝不能在校验失败时把问题交给另一套
+  Answerer 重新回答（历史缺陷 R2-D4：正确 raw answer 被判红后又被重答成错误答案）。
+
+    Planner → 规划；Tool → 事实；Retriever → 知识候选；
+    DeepSeek → 组合回答；Finaliser → 验证。Finaliser 不是第四个 Answer Engine。
+"""
 
 from __future__ import annotations
 
-import copy
 import json
 import re
 import time
 from typing import Any, Callable, Optional
 
 from .answerer import Answerer
-from .schemas import Answer
+from .core.numbers import extract_date_parts, extract_numbers
+from .ledger import (
+    DATA_SOURCE,
+    KNOWLEDGE_SOURCE,
+    FactLedger,
+    ToolReceipt,
+    select_evidence,
+)
 from .llm import LLMClient, LLMError
 from .planner import Plan
+from .schemas import Answer
 from .toolspec import TOOLS
 
 MAX_TOOL_ROUNDS = 6
 MAX_BAD_ARGS = 2
-#: 评测 evidence_hygiene 的上限（run_eval.py MAX_EVIDENCE_*）。
-#: 数字上限是**全部 result 合计**的预算，不是单条的上限。
-MAX_EVIDENCE_RESULT_BYTES = 4096
-MAX_EVIDENCE_NUMBERS = 60
 _DOC_MARK = re.compile(r"[\[【]\s*(KB-\d+)\s*[\]】]")
-_NUMBER = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
-_DATE_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_LIKE = re.compile(r"(20\d{2})\s*年")
 
 #: 工具轮次用尽后的强制作答指令：让"没找到"以正文形式说出来，
@@ -31,6 +46,16 @@ FORCE_FINAL_NOTE = (
     "（系统提示：工具调用次数已用尽。不要再请求任何工具；"
     "基于已经获得的查询与检索结果直接给出最终回答。"
     "如果相关文档没有找到，就如实说明没有找到，并把已查到的数据事实说清楚。）"
+)
+
+#: Finaliser 的**一次**有界 repair 指令（任务书 §二十一）：
+#: 不重新检索、不重新规划、不重新取数，只基于已有事实改写。
+#: 这是"要求模型修正"，不是"换一套引擎重答"。
+REPAIR_NOTE = (
+    "（系统校验：你上一条回答里出现了数据库与文档都支撑不了的数字：{bad}。"
+    "请**只依据下面已经查到的事实**重写一遍回答：不要再请求任何工具，"
+    "不要引入任何新数字，也不要解释校验过程本身。\n"
+    "已查到的事实：\n{facts}）"
 )
 
 SYSTEM_PROMPT = """你是一家连锁餐饮公司的经营分析助手，服务对象是运营同事。
@@ -49,6 +74,13 @@ SYSTEM_PROMPT = """你是一家连锁餐饮公司的经营分析助手，服务�
 9. 引用文档注意年份：问题问哪一年，就只引用那一年的方案或报告，往年的同题文档不要引用。
 10. 工具用法：查具体经营数字用 query_metrics（能带 store_id/product_id 就带上）；查排行用 top_products 且 limit 不超过 10；daily_metrics 只查需要的日期范围。对“为什么”类问题，检索两三轮仍没有找到解释性文档就停止检索，如实说明没有找到。检索关键词宜少而具体（两三个词）：一次塞七八个词会稀释相关性，反而捞不到最相关的片段；英文文档直接用英文关键词（如 credit note）。
 """
+
+
+def _as_json_object(result) -> Any:
+    """工具边界的兜底：LiveEngine 永远拿到 JSON object（见 service._as_json_object）。"""
+    if isinstance(result, dict):
+        return result
+    return {"value": result}
 
 
 class LiveEngine:
@@ -73,12 +105,11 @@ class LiveEngine:
     def answer(self, plan: Plan, trace, history: list[dict]) -> Answer:
         deadline = time.perf_counter() + self.budget
         messages = self._initial_messages(plan, history)
-        evidence: list[dict] = []
+        ledger = FactLedger()
         retrieved: dict[str, list] = {}
-        used_numbers = 0
         bad_args = 0
 
-        for round_index in range(MAX_TOOL_ROUNDS):
+        for _round in range(MAX_TOOL_ROUNDS):
             remaining = deadline - time.perf_counter()
             if remaining < 10:
                 raise LLMError("budget", "整体耗时接近 /api/chat 的时限，已停止调用模型")
@@ -86,7 +117,7 @@ class LiveEngine:
                 messages, TOOLS, budget=remaining, on_call=trace.llm
             )
             if not reply.tool_calls:
-                return self._finalise(plan, reply.content, evidence, retrieved, trace)
+                return self._finalise(plan, messages, reply, ledger, retrieved, trace, deadline)
             # D8：assistant 消息整条追加，含 reasoning_content，否则下一轮 400。
             messages.append(reply.message)
             round_bad = 0
@@ -112,22 +143,22 @@ class LiveEngine:
                     )
                     continue
                 started = time.perf_counter()
-                result = self.run_tool(name, params)
+                result = _as_json_object(self.run_tool(name, params))
                 trace.step("tool", {"tool": name, "params": params}, started=started)
+
+                source = KNOWLEDGE_SOURCE if name == "search_kb" else DATA_SOURCE
                 if name == "search_kb":
                     retrieved[json.dumps(params, ensure_ascii=False)] = result.get("results", [])
-                elif "error" not in result:
-                    # D27：按评测 evidence_hygiene 收口——单条 ≤4096 字节，
-                    # 全程数字预算 ≤60（"穷举数字不是证据"）。模型看到的内容不变
-                    # （下面 [:6000] 原样给），收口只作用于落库的 data_evidence。
-                    result, used = _hygiene_compact(result, MAX_EVIDENCE_NUMBERS - used_numbers)
-                    used_numbers += used
-                    evidence.append({"tool": name, "params": params, "result": result})
+                receipt = ledger.add(name, params, result, source=source)
+                trace.step("tool_receipt_created", receipt.trace_detail())
+
+                # **模型看到的永远是 canonical 事实**（必要时结构化收缩），
+                # 绝不被 API evidence 的 4096/60 预算改写成 truncated stub（R2-D1）。
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call.get("id"),
-                        "content": json.dumps(result, ensure_ascii=False)[:6000],
+                        "content": ledger.model_projection(receipt),
                     }
                 )
             if round_bad:
@@ -148,7 +179,7 @@ class LiveEngine:
         reply = self.client.chat_with_retry(messages, None, budget=remaining, on_call=trace.llm)
         if reply.tool_calls or not reply.content.strip():
             raise LLMError("tool_loop", "强制作答轮仍未给出正文")
-        return self._finalise(plan, reply.content, evidence, retrieved, trace)
+        return self._finalise(plan, messages, reply, ledger, retrieved, trace, deadline)
 
     # -- 组装 -------------------------------------------------------------------
 
@@ -182,36 +213,55 @@ class LiveEngine:
         messages.append({"role": "user", "content": question})
         return messages
 
+    # -- Finalisation Authority -------------------------------------------------
+
     def _finalise(
-        self, plan: Plan, content: str, evidence: list[dict], retrieved: dict, trace
+        self, plan: Plan, messages: list[dict], reply, ledger: FactLedger,
+        retrieved: dict, trace, deadline: float,
     ) -> Answer:
-        doc_ids = []
-        for match in _DOC_MARK.finditer(content):
-            if match.group(1) not in doc_ids:
-                doc_ids.append(match.group(1))
-        text = _DOC_MARK.sub("", content).strip()
+        """验证 → （必要时）一次有界 repair → 证据选择 → 响应。
+
+        这里**只**做四件事：解析、验证、要求修正、安全拒答。
+        它不会再调用 ``Answerer.answer()``——live 模式下没有第二套作答器。
+        """
+        text, doc_ids = _split_doc_marks(reply.content)
         citations = self._citations(plan, doc_ids)
-        # D31：正文明说"没有找到"解释时清空引用——对齐 mock 管线的
-        # cause_not_found 槽位（缺陷 #22）。模型有时为了展示"我查过了"，
-        # 点名别家门店的停业通知当例子；评测对"why 类且无解释文档"判 cite_max=0。
-        if citations and _says_no_explanation(text):
-            trace.step(
-                "citations_cleared_no_explanation",
-                {"dropped": [c["doc_id"] for c in citations]},
-            )
-            citations = []
-        allowed = self._allowed_numbers(plan, evidence, citations)
-        bad = [value for value in _numbers_in(text) if not _matches(value, allowed)]
+        citations = _clear_citations_if_no_explanation(text, citations, trace)
+        allowed = self._allowed_numbers(plan, ledger, citations)
+        bad = _unsupported_numbers(text, allowed)
+        trace.step("final_validation", {
+            "pass": not bad,
+            "unsupported": bad[:5],
+            "answer_numbers": len(extract_numbers(text)),
+        })
+
         if bad:
-            trace.step("number_check_failed", {"unmatched": bad[:5]})
-            fallback = self.answerer.answer(plan, trace)
-            fallback.notes.append(
-                "模型回答里的数字 %s 在工具结果里找不到，已改用按工具结果渲染的模板回答。"
-                % "、".join(str(value) for value in bad[:5])
-            )
-            return fallback
+            repaired = self._repair(plan, messages, ledger, bad, trace, deadline)
+            if repaired is None:
+                return self._refusal(bad, ledger)
+            text, doc_ids = _split_doc_marks(repaired)
+            citations = self._citations(plan, doc_ids)
+            citations = _clear_citations_if_no_explanation(text, citations, trace)
+            allowed = self._allowed_numbers(plan, ledger, citations)
+            bad = _unsupported_numbers(text, allowed)
+            if bad:
+                trace.step("repair_attempt", {"result": "still_unsupported",
+                                              "unsupported": bad[:5]})
+                return self._refusal(bad, ledger)
+            trace.step("repair_attempt", {"result": "valid",
+                                          "answer_numbers": len(extract_numbers(text))})
+
         if not text:
             raise LLMError("empty_content", "模型最终回答为空")
+
+        evidence = select_evidence(ledger, extract_numbers(text), plan)
+        trace.step("evidence_selected", {
+            "receipts": [item.get("receipt_id") for item in evidence],
+            "tools": [item.get("tool") for item in evidence],
+            "count": len(evidence),
+        })
+        trace.step("evidence_projected", _projection_stats(evidence))
+
         if evidence and citations:
             answer_type = "hybrid"
         elif evidence:
@@ -225,6 +275,43 @@ class LiveEngine:
             answer_type=answer_type,
             citations=citations,
             data_evidence=evidence,
+        )
+
+    def _repair(self, plan: Plan, messages: list[dict], ledger: FactLedger,
+                bad: list[float], trace, deadline: float) -> Optional[str]:
+        """一次有界 repair：不带工具、不给新事实，只让模型基于已有事实改写。"""
+        remaining = deadline - time.perf_counter()
+        if remaining < 5:
+            trace.step("repair_attempt", {"result": "no_budget"})
+            return None
+        note = REPAIR_NOTE.format(
+            bad="、".join(_fmt(value) for value in bad[:5]),
+            facts=_facts_digest(ledger),
+        )
+        repair_messages = list(messages) + [{"role": "user", "content": note}]
+        try:
+            reply = self.client.chat_with_retry(
+                repair_messages, None, budget=remaining, on_call=trace.llm
+            )
+        except LLMError as exc:
+            trace.step("repair_attempt", {"result": "llm_error", "kind": exc.kind})
+            return None
+        if reply.tool_calls or not (reply.content or "").strip():
+            trace.step("repair_attempt", {"result": "no_content"})
+            return None
+        return reply.content
+
+    def _refusal(self, bad: list[float], ledger: FactLedger) -> Answer:
+        """结构化拒答：不重新回答、不编数字、不静默换答案。"""
+        return Answer(
+            answer=(
+                "这次模型给出的回答里有数据库和知识库都支撑不了的数字，"
+                "为了不给出没有依据的结论，这个问题先不回答。"
+                "可以把问题问得更具体一些，或展开数据证据查看已经查到的原始结果。"
+            ),
+            answer_type="refusal",
+            notes=["finaliser 判定回答数字无依据：%s"
+                   % "、".join(_fmt(value) for value in bad[:5])],
         )
 
     def _citations(self, plan: Plan, doc_ids: list[str]) -> list[dict]:
@@ -251,26 +338,91 @@ class LiveEngine:
                 citations.append(citation)
         return citations
 
-    def _allowed_numbers(self, plan: Plan, evidence: list[dict], citations: list[dict]) -> list[float]:
+    def _allowed_numbers(self, plan: Plan, evidence, citations: list[dict]) -> list[float]:
+        """回答里的数字"白名单"。
+
+        ``evidence`` 可以是 :class:`FactLedger`（live 正常路径）或
+        ``{"result": ...}`` 列表（测试直接调用）。白名单用 **canonical** 结果，
+        不是收口后的投影——校验的是"事实支不支持"，与证据体积无关。
+        """
         allowed: list[float] = []
-        for item in evidence:
-            allowed.extend(_numbers_in(json.dumps(item, ensure_ascii=False)))
+        if isinstance(evidence, FactLedger):
+            results = [receipt.result for receipt in evidence.data_receipts()]
+        else:
+            results = [item.get("result") for item in (evidence or [])]
+        for result in results:
+            allowed.extend(extract_numbers(json.dumps(result, ensure_ascii=False, default=str)))
         for citation in citations:
             meta = self.answerer.retriever.index.docs_meta.get(citation["doc_id"], {})
             # D28 兜底：估算类文档（周报/纪要/反馈汇总）的数字不进白名单。
-            # 模型要是真把"大概 150 份"写进回答，数字校验才会抓到它、
-            # 打回按工具结果渲染的模板回答（numbers_none 的最后防线）。
             if meta.get("estimates_only"):
                 continue
-            allowed.extend(_numbers_in(self.answerer.retriever.index.texts.get(citation["doc_id"], "")))
-        allowed.extend(_numbers_in(plan.question))
-        allowed.extend(_numbers_in(plan.standalone))
+            # R2 收紧：只认**引用摘出的那一句**里的数字，而不是整篇文档。
+            # 引一篇数字很多的文档，不该让无关数字自动通过校验。
+            # （claim → exact source span 的强绑定属于 Round 4 的 citation provenance。）
+            allowed.extend(extract_numbers(citation.get("quote") or ""))
+        allowed.extend(extract_numbers(plan.question))
+        allowed.extend(extract_numbers(plan.standalone))
         if plan.window:
-            allowed.extend(_numbers_in(" ".join(plan.window)))
+            allowed.extend(extract_numbers(" ".join(plan.window)))
+        # 复述问题里的日期（"8 月 17 日到 19 日"）不是编造的经营数字。
+        # 注意 extract_numbers 里日期原本就被整体遮蔽，这里补的是**分量**
+        # （年/月/日），只影响白名单，不影响任何空径上的数字语义。
+        allowed.extend(extract_date_parts(plan.question))
+        allowed.extend(extract_date_parts(plan.standalone))
+        if plan.window:
+            allowed.extend(extract_date_parts(" ".join(plan.window)))
         derived = []
         for value in allowed:
             derived.extend([round(value, 2), round(value)])
         return sorted(set(allowed + derived))
+
+
+# ------------------------------------------------------------------ 模块级小工具
+
+
+def _split_doc_marks(content: str) -> tuple[str, list[str]]:
+    doc_ids: list[str] = []
+    for match in _DOC_MARK.finditer(content or ""):
+        if match.group(1) not in doc_ids:
+            doc_ids.append(match.group(1))
+    return _DOC_MARK.sub("", content or "").strip(), doc_ids
+
+
+def _unsupported_numbers(text: str, allowed: list[float]) -> list[float]:
+    return [value for value in extract_numbers(text) if not _matches(value, allowed)]
+
+
+def _matches(value: float, allowed: list[float]) -> bool:
+    return any(abs(value - candidate) <= 0.011 for candidate in allowed)
+
+
+def _fmt(value: float) -> str:
+    return "%g" % value
+
+
+def _facts_digest(ledger: FactLedger, limit: int = 1200) -> str:
+    """repair 时给模型看的"已有事实"摘要：只列数据 receipt 的参数与结果。"""
+    lines: list[str] = []
+    for receipt in ledger.data_receipts():
+        blob = json.dumps(receipt.result, ensure_ascii=False, default=str)
+        if len(blob) > 400:
+            blob = blob[:400] + "…"
+        lines.append("- %s %s → %s" % (receipt.receipt_id, receipt.tool,
+                                       json.dumps(receipt.params, ensure_ascii=False)))
+        lines.append("  %s" % blob)
+    return "\n".join(lines)[:limit] or "（这次没有任何数据库查询结果）"
+
+
+def _projection_stats(evidence: list[dict]) -> dict:
+    numbers = 0
+    sizes = []
+    for item in evidence:
+        blob = json.dumps(item.get("result"), ensure_ascii=False, default=str)
+        sizes.append(len(blob.encode("utf-8")))
+        numbers += len(extract_numbers(blob))
+    return {"receipts": [item.get("receipt_id") for item in evidence],
+            "numbers": numbers, "bytes": sizes}
 
 
 #: "没有找到"词族与它附近的因果/说明类词，二者同时出现才算"明说没找到解释"
@@ -295,6 +447,18 @@ def _says_no_explanation(text: str) -> bool:
     return False
 
 
+def _clear_citations_if_no_explanation(text: str, citations: list[dict], trace) -> list[dict]:
+    """D31：正文明说"没有找到"解释时清空引用——对齐 mock 管线的
+    cause_not_found 槽位（缺陷 #22）。模型有时为了展示"我查过了"，
+    点名别家门店的停业通知当例子；评测对"why 类且无解释文档"判 cite_max=0。
+    """
+    if citations and _says_no_explanation(text):
+        trace.step("citations_cleared_no_explanation",
+                   {"dropped": [c["doc_id"] for c in citations]})
+        return []
+    return citations
+
+
 def _question_year(plan: Plan) -> Optional[int]:
     """问题问的是哪一年：优先取时间窗，其次取问句里显式写出的年份。"""
     if plan.window:
@@ -310,84 +474,16 @@ def _question_year(plan: Plan) -> Optional[int]:
 
 
 def _numbers_in(text: str) -> list[float]:
-    values = []
-    for match in _NUMBER.finditer(_DATE_LIKE.sub(lambda m: m.group(0).replace("-", " "), text or "")):
-        try:
-            values.append(float(match.group(0).replace(",", "")))
-        except ValueError:
-            continue
-    return values
+    """经营数字提取：口径统一在 ``core.numbers``（与评测脚本对齐）。
 
-
-def _matches(value: float, allowed: list[float]) -> bool:
-    return any(abs(value - candidate) <= 0.011 for candidate in allowed)
-
-
-# --------------------------------------------------------------------------- D27 收口
-
-
-def _result_blob(result) -> str:
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-def _fits(result, budget_numbers: int) -> Optional[int]:
-    """满足评测两条上限时返回占用的数字数，否则 None。"""
-    blob = _result_blob(result)
-    if len(blob.encode("utf-8")) > MAX_EVIDENCE_RESULT_BYTES:
-        return None
-    used = len(_numbers_in(blob))
-    return used if used <= budget_numbers else None
-
-
-def _at(value, path: tuple):
-    for key in path:
-        value = value[key]
-    return value
-
-
-def _lists_of(value, path: tuple = ()):
-    """枚举结构里全部列表（含嵌套），返回 (根相对路径, 列表)。"""
-    if isinstance(value, list):
-        yield path, value
-        for index, child in enumerate(value):
-            yield from _lists_of(child, path + (index,))
-    elif isinstance(value, dict):
-        for key, child in value.items():
-            yield from _lists_of(child, path + (key,))
-
-
-def _trim_longest_list(result, budget_numbers: int):
-    """把最长的列表反复砍半，直到装得下；无可裁列表时返回 None。"""
-    current = copy.deepcopy(result)
-    for _ in range(24):
-        used = _fits(current, budget_numbers)
-        if used is not None:
-            return current, used
-        candidates = sorted(
-            (len(node), path) for path, node in _lists_of(current) if len(node) > 1
-        )
-        if not candidates:
-            return None
-        node = _at(current, candidates[-1][1])
-        node[:] = node[: max(1, len(node) // 2)]
-    return None
-
-
-def _hygiene_compact(result, budget_numbers: int) -> tuple:
-    """把一条工具结果收口到评测 evidence_hygiene 的上限内。
-
-    返回 (收口后的 result, 占用数字数)。裁剪顺序：
-    原样 → 最长列表减半 → 仍不行就整条换成占位说明（数字归零）。
-    模型读到的消息内容不受影响，收口只作用于落库的 data_evidence。
+    历史缺陷（R2-D3）：这里曾用一条粗 regex + 只认 ``YYYY-MM-DD`` 的遮蔽，
+    把 ``KB-001``（→ -1）、``07-31``（→ -31）当成了"模型编造的数字"。
     """
-    used = _fits(result, budget_numbers)
-    if used is not None:
-        return result, used
-    trimmed = _trim_longest_list(result, budget_numbers)
-    if trimmed is not None:
-        return trimmed
-    stub = {
-        "note": "原始结果超过证据上限，已收口；请用更小的区间或更小的 limit 重新查询",
-        "truncated": True,
-    }
-    return stub, len(_numbers_in(_result_blob(stub)))
+    return extract_numbers(text)
+
+
+__all__ = [
+    "LiveEngine", "FORCE_FINAL_NOTE", "REPAIR_NOTE", "SYSTEM_PROMPT",
+    "MAX_TOOL_ROUNDS", "MAX_BAD_ARGS",
+    "ToolReceipt",
+]
