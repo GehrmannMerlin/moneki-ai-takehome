@@ -25,6 +25,12 @@ docs/_*.png
 docs/_*.html
 docs/_*.log
 
+# 根目录游离产物：用户提供的自补题库（只读输入）与不带 --out 时落地的评测报告
+/moneki_extra_hybrid_eval_bank.json
+/moneki_extra_hybrid_eval_bank.jsonl
+/report.json
+/report.md
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db

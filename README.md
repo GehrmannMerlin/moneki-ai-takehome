@@ -210,12 +210,44 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 | HTTP | `kbqa/server.py` | 保留外壳，6 个契约接口都在 |
 | **数据** | **`kbqa/core/normalize.py`、`cleaning.py`、`metrics.py`、`datatools.py`、`manifest.py`** | **✅ P1 已重写 + R1 泛化加固**（七规则分类清洗 / v3+v2 口径引擎 / 只读数据工具 / 数据指纹与构建清单） |
 | **检索** | **`kbqa/core/textnorm.py`、`loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`** | **✅ P2 已重写**（四后缀加载 / GBK 降级 / HTML 剥标签 / 标题感知切块 / jieba / 内容哈希缓存键 / 先滤后取） |
-| 编排 | `kbqa/service.py`、`planner.py`、`answerer.py`、`live.py` | 待 P3 重写编排与安全闸 |
+| 编排 | `kbqa/service.py`、`planner.py`、`answerer.py`、`live.py`、**`ledger.py`** | **✅ P3 已重写 + R2 收敛 live 作答权威**（`LiveEngine` 走 `FactLedger`：canonical receipt / model projection / evidence projection 三分；finaliser 只校验、不重答） |
 | 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`sanitize.py` | starter 里这些比预期完整，P3 移植复用 |
 | 模型 | `kbqa/llm.py`、`toolspec.py` | 待 P3 按契约 §7 复核；接入说明见 [`LLM_SETUP.md`](LLM_SETUP.md) |
 | 基建 | `scripts/baseline_report.py`、`tests/` | P0 建；P1/P2 用 `tests/defects/` 做缺陷复现，`tests/test_metrics.py` / `test_api_metrics.py` 做回归 |
 | ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`1ec0f56`） |
 | ~~旧模块~~ | ~~`kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`、`sanitize.py`~~ | **已删除**（P2 `fdd3774`），被 `kbqa/core/` 取代 |
+
+### live 作答权威（泛化 R2 收敛）
+
+live 模式下"事实"与"最终作答"是两个不同的权威，四个角色各管一段，谁都不越权：
+
+```text
+ DataTools
+    ↓  每次执行登记一条不可变 ToolReceipt（canonical raw result）
+ FactLedger ──────────────┬──────────────────────────────┐
+    │                     │                              │
+    │ model projection    │                              │ evidence projection
+    ↓                     │                              ↓
+ DeepSeek（工具循环，读到完整事实）                          Evidence Selector
+    ↓ 组合出回答                                            （只选支持最终回答的 receipt）
+ Validator（finaliser）                                    ↓
+    │  校验回答里的经营数字是否有事实依据                     /api/chat.data_evidence
+    ├─ 通过 → 选证据 → 响应                                 （单条 ≤4096 字节、合计 ≤60 数字）
+    ├─ 不通过 → 一次 bounded repair（不带工具，只依据已有 receipt 改写）→ 再校验
+    └─ 仍不通过 → 结构化 refusal
+```
+
+三条不变量（都有回归测试钉住）：
+
+1. **Model Context Budget ≠ API Evidence Budget**——模型读到的是完整事实（必要时结构化收缩，
+   绝不替换成 `{"truncated": true}` 的 stub）；只有落库的 `data_evidence` 受 4096/60 约束。
+2. **Evidence 是 final answer 的证据，不是 Tool Call History**——工具历史在 trace 里；
+   未被回答使用的宽查询不占证据预算，证据集合与**工具调用顺序无关**。
+3. **Finaliser 不是第四个 Answer Engine**——它只能验证、选证据、要求模型修正一次、或安全拒答；
+   **绝不**在校验失败时把问题交给另一套作答器（mock/无 Key 降级才用 `Answerer`）。
+
+> ⚠️ 仍未解决（**Round 4**）：`search_kb` 仍可能把 raw KB 文本送进模型上下文。
+> 本轮只保证"finaliser 不会把安全的模型答案变成不安全答案"，不等于修好了 prompt injection。
 
 ### 选型理由
 
@@ -223,7 +255,7 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 |---|---|---|
 | 保留还是重写 | **保壳换芯**：留 FastAPI 外壳与路由，重写清洗/检索/编排核心 | 契约要求路径与字段名不变；外壳没问题，问题都在芯里。starter 的 `aliases`/`sanitize`/`timeparse`/`render` 等模块比预期完整，移植比重写省时且少引入新缺陷 |
 | 检索 | **jieba + BM25 为主，向量为可选增强** | starter 的检索失效根因是分词（`tokenizer.py:20-22` 按空白切，中文整句成了一个 token），不是缺少向量。先修对主干，向量按契约 §7.6 做成"不可用时自动退回 BM25" |
-| 答案里的数字 | **代码模板渲染，不让模型写数字** | `deepseek-flash` 是小模型，思考模式下 `temperature` 还不生效（契约 §7.3）。数字必须来自真实查询、且同源同舍入地出现在 `data_evidence` 里 |
+| 答案里的数字 | **mock：代码模板渲染；live：模型写、代码校验** | `deepseek-flash` 是小模型，思考模式下 `temperature` 还不生效（契约 §7.3）。mock 模式下回答由 `Answerer` 模板渲染；live 模式下数字由 DeepSeek 组合成文，但**必须能追溯到工具事实**：finaliser 只校验、不重答（见下"live 作答权威"）。两种情况数字都同源同舍入地出现在 `data_evidence` 里 |
 | `quote` 生成 | **代码从原文截取**，绝不让 LLM 写 | 评测逐字核对（NFKC + 去空白 + 去 `*` `` ` `` `|` `#` `>`）。小模型会改全半角标点，必挂 |
 | 版本时效 | **as-of 过滤**，默认锚 2026-09-01 | 知识库里故意放了过期版本（KB-002 是 v2）。用户问"当时"的规定时要能切到当时的有效版本 |
 | 大模型接入 | **OpenAI 兼容 + 三个环境变量**，直接用 `httpx` 不上 SDK | 契约 §7.1 推荐路线，评审时评委就是这么切的。自己拼地址才能保证"不补 `/v1`、不截路径" |

@@ -103,6 +103,29 @@ python eval/llm_gateway.py proxy --upstream https://api.deepseek.com --log llm_t
 | `llm[].raw_content` / `raw_reasoning` | 模型原始输出与思考内容 |
 | `llm[].took_ms` / `error` / `detail` | 耗时与真实失败原因 |
 
+live 模式还多了一层**事实溯源**（泛化 R2 引入，`steps` 数组里按发生顺序）：
+
+| trace `step` | 内容 |
+|---|---|
+| `tool` | 工具名与参数（模型请求了什么） |
+| `tool_receipt_created` | `receipt_id` / `tool` / `params` / `numbers` / `result` 摘要 —— **模型看到的 canonical 事实** |
+| `final_validation` | 校验是否通过、哪些数字没有依据、回答里有几个数字 |
+| `repair_attempt` | 一次有界 repair 的结果（`valid` / `still_unsupported` / `no_budget` / `llm_error`） |
+| `evidence_selected` | 最终选进 `data_evidence` 的 receipt 集合（回答用了哪几条事实） |
+| `evidence_projected` | 投影后的数字总数与每条字节数（对齐评测 `evidence_hygiene`） |
+
+于是"模型为什么知道这个数字"可以在 trace 里一条线看下来：
+
+```text
+tool_receipt_created  D1 query_metrics(2026-07-01..07-31) → qty=73
+final_validation      pass=true
+evidence_selected     receipts=["D1"]
+```
+
+**关键区别**：模型读到的 `role=tool` 内容是 `model_projection`（完整事实，必要时结构化收缩，
+绝不出 `truncated` stub）；`data_evidence` 是另一条 `evidence_projection`（受 4096 字节 /
+60 数字约束）。两者都由同一条 receipt 派生，所以"模型看到的"与"落库的"永远同源。
+
 脱敏样例（Key 从不入 trace，`Authorization` 头不记录）：
 
 ```json
@@ -275,8 +298,53 @@ BM25 查询用法 / 无解释引用 / as-of 语境）与协议无关，已作为
 
 ---
 
-## 8. 已知限制
+### 7.5 泛化 R2 后的复跑（2026-09-27）
 
+泛化 R2 重写了 live 作答权威（ToolReceipt / FactLedger / Finalisation Authority），
+改的是**作答层**，不碰协议层。按任务书要求必须复跑预检，确认 DeepSeek 兼容性、
+`reasoning_content` 回传、工具调用语义、超时、HTTP 错误降级、无 Key 行为**不退化**。
+
+命令（无 Key，用本地假模型顶替 DeepSeek）：
+
+```bash
+# 先用注入的三个环境变量把服务起在 8000（此时 LLM_BASE_URL 指向假模型 18801）
+cd starter
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+  .venv/Scripts/python ../eval/llm_gateway.py preflight \
+  --service-url http://localhost:8000 \
+  --port 18801 --no-wait
+```
+
+实测结论：**P1–P14 全部通过**（`exit=0`），14 项无误。报告原件
+`eval/_preflight/preflight_report.md`。关键几项：
+
+| 编号 | 检查项 | 结果 | 实测说明 |
+|---|---|---|---|
+| P1 | 请求确实发到注入的 `LLM_BASE_URL`（含路径前缀） | 通过 | 共观察到 60 次 `POST /ds-gw/chat/completions`。 |
+| P7 | 工具定义规范，且每个工具调用以 `role=tool` + `tool_call_id` 回传 | 通过 | 44 个工具调用的结果都正确回传。 |
+| P8 | 每个场景 `/api/chat` 返回 200 与字段完整 JSON | 通过 | 32 次问答全部 200 + 字段完整。 |
+| P11 | 在时限内返回（含长时无响应场景） | 通过 | 最慢 121.38 秒（`hang` 场景 read 超时），都在 180 秒以内。 |
+| P13 | 多轮之间 `reasoning_content` 原样回传（未触发 400） | 通过 | 18 次多轮请求都原样回传了 `reasoning_content`。 |
+
+与 R1（§7.1）逐项对比**无退化**：空回答 / 超时 / 各档 HTTP 错误码仍全部降级为
+结构化 `refusal`（`answer_type=refusal`，`answer` 从不是空串），
+思考标记仍只进 trace、不进 `answer`/`citations`/`data_evidence`。R2 新增的
+Finalisation Authority 只在**正常作答路径**生效，模型不可用时的降级路径未变。
+
+**两次现场踩坑（记录在此，免得下次再撞）：**
+
+1. **Git Bash 会改写命令行里以 `/` 开头的选项值。** 一旦显式传 `--prefix /ds-gw`，
+   MSYS 会把它转成 `C:/Users/.../ds-gw`，于是 P1/P6 判定请求打歪、失败。
+   默认值不受影响，但为避免踩坑，整条命令加 `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`
+   前缀；PowerShell 无此问题。
+2. **默认端口可能被 Windows 保留。** 预检默认的 8901 绑定时报 `WinError 10013`，
+   `netsh int ipv4 show excludedportrange tcp` 显示 8889–8988 整段被 Hyper-V/系统
+   排除。改到 **18801** 后正常。另外 `hang` 场景会让脚本在退出前等待，加
+   `--no-wait` 避免卡在交互式确认上。
+
+---
+
+## 8. 已知限制
 清楚但还没解决的，一并写在这里。
 
 1. **真实 Key 已接入（2026-09-26），live 终评 100.00 / 100 + 28.00 / 28**（`EVAL_REPORT.md` §6）。
@@ -292,13 +360,20 @@ BM25 查询用法 / 无解释引用 / as-of 语境）与协议无关，已作为
    预检里与流式有关的项会显示"未检查"而不是"通过"。
 3. **`CHAT_BUDGET` 默认 150 秒**，不是契约的 180 秒上限，留了 30 秒给响应序列化。
    预检 P11 实测最慢 23.55 秒（含 `hang` 场景的 read 超时），离上限很远。
-4. **live 模式下模型回答里的数字会被校验**：凡涉及经营数字必须与工具结果同源，
-   不一致就回退到按工具结果渲染的模板回答。这个回退是**保守**的——
-   宁可措辞死板，也不给未经验证的数字。
-5. **思考模式开关未显式设置**（`deepseek-flash` 默认开启），理由见 README：
+4. **live 模式下模型回答里的数字会被校验，但校验器不再"重答"**（泛化 R2 改动）。
+   凡涉及经营数字，必须能在工具结果或引用摘句里找到依据；找不到就**只**让模型
+   基于已有事实**改写一次**（repair 轮不带工具、不新增事实），仍不通过则返回
+   结构化 refusal。旧行为（校验失败 → 交给另一套 `Answerer` 重新回答）已删除——
+   它会把"模型已经答对的问题"重新答错（H069，见 `AI_USAGE.md` 2.24 与
+   `DEBUG_LOG.md` #40）。数字口径与评测脚本一致（`kbqa/core/numbers.py`）。
+5. **Round 4 未完成：raw KB 文本仍会进入模型上下文。** `search_kb` 返回的
+   `results[].text` 是原文片段，模型能看到；`Hit.safe_text` 的收敛（注入过滤 /
+   来源权威分级 / citation provenance）属于后续轮次。本轮只保证"finaliser 不会
+   把安全的模型答案变成不安全答案"，**不等于**修好了 prompt injection。
+6. **思考模式开关未显式设置**（`deepseek-flash` 默认开启），理由见 README：
    多轮工具调用更稳，代价是更慢更贵；`reasoning_content` 只进 trace，不进 answer。
-6. **`max_tokens` 显式 4096**（契约要求不设或不小于 2048）。
-7. **`tool_choice: "auto"` 是唯一带上的非必需参数**，预检 P4 判定它在
+7. **`max_tokens` 显式 4096**（契约要求不设或不小于 2048）。
+8. **`tool_choice: "auto"` 是唯一带上的非必需参数**，预检 P4 判定它在
    DeepSeek 文档列出的顶层参数之内。若你们那边有异议，删掉它不影响功能。
-8. **trace 里超过 256KB 的字段会写文件、trace 存路径**（`var/llm_payloads/`）。
+9. **trace 里超过 256KB 的字段会写文件、trace 存路径**（`var/llm_payloads/`）。
    正常一轮提示词只有几 KB，不会触发。

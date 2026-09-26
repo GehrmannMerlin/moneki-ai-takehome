@@ -594,6 +594,60 @@ R1 的验收问题（换数字/换 KB/换路径是否零代码改动成立）逐
 
 ---
 
+## §8 Generalization Round 2 回归（Live Fact Ledger & Finalisation Authority）
+
+> **这不是新的 live 评分**。R2 改的是 live 流水线的**事实权威**与**最终作答权威**
+> （canonical ToolReceipt / model 与 evidence 投影分离 / 数字语义对齐 /
+> finaliser 只校验不重答）。本节的分数用来验证"重构没有破坏任何已有能力"。
+> 自补题库与 scripted 回归**不属于官方分数**，已明确区分。
+
+| 项 | 值 |
+|---|---|
+| 官方公开 mock | **RUN** —— `100.00 / 100.00（55/55 全绿）`，十类全部满分（命令见下） |
+| 官方公开 live | **NOT RUN** —— 本轮环境没有配置 `LLM_API_KEY`（不伪造 live 结果） |
+| 自补题库（`moneki_extra_hybrid_eval_bank.*`，用户文件，只读） | **NOT RUN** —— 本轮不以 extra 总分为完成条件（Planner/Session/Citation 属后续轮次） |
+| scripted 回归（`tests/generalization/test_live_authority.py`） | **RUN** —— 18 条全绿（16 条 RED→GREEN + H069 与日期回归） |
+| 单元/后端测试 | `pytest tests` → **290 passed, 0 failed**（R1 基线 272 + R2 新增 18）；`--junitxml` 复核 `failures=0 errors=0` |
+| LLM gateway preflight（P1–P14） | 见下"§8.2" |
+| git `diff --check` | 无空白错误 |
+
+### §8.1 官方公开 mock（RUN）
+
+```bash
+# 服务以 mock 模式启动（不注入 LLM_* 环境变量）
+cd starter && .venv/Scripts/python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000
+# 题库（从仓库根目录）
+python eval/run_eval.py --base-url http://localhost:8000 --questions eval/public_questions.jsonl
+```
+
+结果：`总分 100.00 / 100.00（100.0%）`，55/55 全绿，与 §7 的 R1 基线一致 → **无回退**。
+
+### §8.2 LLM gateway preflight（RUN）
+
+沿用项目既有流程（`eval/llm_gateway.py` 自带假模型服务，不需要真实 Key）：
+
+```bash
+# 终端 A：把服务指向假模型（端口必须避开 Windows 排除范围，见 LLM_SETUP §7.5 的踩坑记录）
+cd starter
+LLM_BASE_URL=http://127.0.0.1:18801/ds-gw LLM_API_KEY=preflight-key-3b9c1f \
+LLM_MODEL=preflight-model-7f3a .venv/Scripts/python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000
+# 终端 B（Git Bash 需加 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'，避免 /ds-gw 被改写）
+python eval/llm_gateway.py preflight --service-url http://localhost:8000 \
+    --port 18801 --no-wait
+```
+
+结论见 `LLM_SETUP.md` §7.5（P1–P14 全部通过，含本轮新踩到的端口/路径转换两个坑）。
+
+### §8.3 自补 live 子集（NOT RUN）
+
+本机没有可用真实 Key（`LLM_API_KEY` 未配置），**不伪造**任何 live 数字。
+R2 的目标不是"再多做对几道题"，而是"模型已经答对时，系统不许把它改错"——
+这一点由 scripted 回归（`test_live_authority.py`）与 `DEBUG_LOG.md` #38–#42 的证据链承担。
+一旦配置 Key，建议按 `H001 / H018 / H025 / H069 / H071` 做定向复验（判断标准是
+"raw DeepSeek 正确 → final response 不得变错"，不是这些题必须全 PASS）。
+
+---
+
 ## 附：怎么复现这张表
 
 ```bash

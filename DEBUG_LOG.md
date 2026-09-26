@@ -632,6 +632,72 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+## 缺陷 #38：生产数字提取把编号 / 日期 / 时间当经营数字【泛化 R2 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 真实 DeepSeek 复评后逐条比对 raw 回答与 trace，发现大量最终 FAIL 并不是模型答错：模型的原始回答是对的，却在最终校验阶段被判"数字没有依据"。真实 trace 里出现过 `KB-001 → -1`、`KB-029 → -29`、`07-31 → -31` 被当成"模型编造的经营数字"。 |
+| **假设** | ① `live.py` 的 `_numbers_in()` 只有一条粗 regex `-?\d+(?:,\d{3})*(?:\.\d+)?`，没有遮蔽编号（**成立**）；② 它的 `_DATE_LIKE` 只认 `YYYY-MM-DD`，其它日期写法（`2026/7/31`、`2026年7月31日`、`7月31日`）完全不遮蔽（**成立**）；③ 它把 `07-31` 里的 `-31` 当负数取出来（**成立**）；④ 与评测脚本 `eval/run_eval.py::extract_numbers` 的口径不一致，`万/亿` 没换算、NFKC 没做（**成立**）。 |
+| **验证实验** | 直接对生产实现跑合成串（`tests/generalization/test_live_authority.py`）：<br>`"KB-001 KB-029 S02 P06 ORD123456 t-20260901-0001"` → `[-1.0, -29.0, 2.0, 6.0, 123456.0, -20260901.0, -1.0]`；<br>`"2026-07-31 2026/7/31 31-07-2026 2026年7月31日 7月31日 23:00"` → `[2026.0, 7.0, 31.0, … 23.0, 0.0]`；<br>`"营业额 1,377 元（¥1377，占 76.56%），约 1.23 万。"` → 缺 `12300.0`（`万` 未换算）。另有交叉验证测试逐条比对 evaluator 的 `extract_numbers`。 |
+| **根因** | "哪些数才是经营数字"这件事没有单一权威：日期识别、ID 识别、证据计数、事实支持四条职责共用一条越来越长的 patch regex，于是越修越错。 |
+| **修复** | `abe0963`。新增 `kbqa/core/numbers.py`：把 evaluator 的遮蔽顺序（编号/订单号/实体编号/电话 → 日期 → 时间）与数值语义（NFKC、千分位、`%`、`万/亿`、`MAX_ABS_NUMBER`）**独立实现**一份（生产不允许 `from eval.run_eval import`），并提供 `extract_contract_numbers`（契约计数）与 `extract_date_parts`（日期分量）。`live._numbers_in` 改为它的薄封装。 |
+| **回归测试** | `tests/generalization/test_live_authority.py` 的四条：`test_kb_and_entity_ids_are_not_business_numbers` / `test_dates_and_times_are_not_business_numbers` / `test_real_money_counts_and_percent_are_extracted` / `test_number_semantics_match_evaluator_contract`。**修复前红**（`4cc3732`，**16 failed**，红输出见 `docs/_r2_red.txt`）；修复后绿。 |
+
+---
+
+## 缺陷 #39：evidence compaction 把模型的工具上下文一起裁掉【泛化 R2 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 真实 live 测试里，模型先调用较宽的工具（`by_store` / `top_products` / `daily_metrics`），等它终于发出真正精确的查询（`query_metrics(精确日期, 精确门店, 精确商品)`）时，这条最精准的结果反而被替换成 `{"note": "原始结果超过证据上限，已收口…", "truncated": true}`，而这个 stub 又被直接喂回模型——模型永远看不到它刚查到的精确事实。 |
+| **假设** | `live.py` 里 `result, used = _hygiene_compact(result, …)` **覆盖了 result 变量本身**，随后 `messages.append({"role":"tool","content": json.dumps(result)})` 用的就是收口后的结果；而旁边注释却写着"模型看到的字段不变，收口只作用于落库的 data_evidence"（**成立——代码与注释自相矛盾**）。 |
+| **验证实验** | 合成两条工具结果：宽结果 10 行 × 5 个（旧口径把 `P9xx` 也算数字）＝ 50 + 6 个数字，占满 60 的全局预算；随后精确结果只剩 4 个数字的预算。旧实现下精确结果被换成 stub，打印"模型实际读到的工具消息"确认。另外用 `git grep` 核实注释与代码不一致。 |
+| **根因** | 只有一个 result 变量承担两种投影：既要"给模型看的事实"，又要"满足 API 契约的证据"。两个预算被错误地绑成一个。 |
+| **修复** | `abe0963` + `a601ff7`。引入 `ToolReceipt` + `FactLedger`：canonical raw result 不可变；`model_projection`（给模型，完整事实，必要时**结构化收缩**、绝不出 stub）与 `evidence_projection`（给 `data_evidence`，受 4096 字节 / 60 数字约束）是两个独立派生。live 循环改为 `messages.append(... ledger.model_projection(receipt))`。 |
+| **回归测试** | `test_model_sees_uncompacted_exact_result_after_broad_query`。**修复前红**（`4cc3732`）；修复后绿。 |
+
+---
+
+## 缺陷 #40：live finaliser 校验失败后调用第二套 Answerer 重答【泛化 R2 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 用真实 Key 做完 165 次补充压测后回看 trace 发现：**很多最终 FAIL 是"被改坏的"**——DeepSeek 原始回答正确，但 `number_check_failed` 触发 `self.answerer.answer(plan, trace)`，mock 的 `Answerer` 重新回答一遍，正确答案被换成错误答案。H069 是最典型的一例：raw 回答安全地拒绝了恶意数字并给出真实数据库数字，最终 response 却是 `9,999,999`。 |
+| **假设** | ① `_finalise()` 在 `bad` 非空时无条件调用 `self.answerer.answer(...)` 并把它的返回值当作最终答案（**成立**）；② 于是 live 模式下"DeepSeek"只是候选答案生成器，真正有最终作答权的是第二套引擎（**成立**）；③ 那个假阳性本身就是 #38（**成立**）。 |
+| **验证实验** | 给 `service.answerer.answer` 注入一个"一被调用就抛 AssertionError"的替身，再让模型给出完全受支持的正确答案：旧实现在 `KB-901`/日期处误判 → 调用替身 → 抛错，测试红。另注入一个"会返回被恶意 KB 污染答案（含 9,999,999）"的替身，断言它一次都不被调用、且 safe 答案原样保留。 |
+| **根因** | Finaliser 越权成了"第四个 Answer Engine"。正确模型答案和 fallback 答案之间没有权威关系。 |
+| **修复** | `a601ff7`。删除 `number_check_failed → Answerer.answer`。live 失败路径改为：validate → **一次** bounded repair（`tools=None`，只依据已有 receipt 改写，不重新检索/规划/取数）→ 再 validate → 仍不通过则**结构化 refusal**。`Answerer` 只保留给 mock / 无 Key 降级。 |
+| **回归测试** | `test_correct_model_answer_survives_finalisation` / `test_semantic_fallback_is_forbidden_in_live` / `test_unsupported_claim_gets_exactly_one_bounded_repair` / `test_failed_repair_returns_structured_refusal` / `test_h069_safe_model_answer_is_not_replaced_by_injected_kb_answer`。**修复前红**（`4cc3732` + `4cd0ad5`）；修复后绿。 |
+| **边界说明** | 本轮**没有**修好 prompt injection：`search_kb` 仍可能把 raw KB 文本送进模型上下文（`Hit.safe_text` 的数据流收敛属 **Round 4**）。本轮只封印"finaliser 不把安全答案变成不安全答案"。 |
+
+---
+
+## 缺陷 #41：工具 dispatcher 对 scalar / None 结果没有统一 contract【泛化 R2 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 真实多轮压测 MT05 出现过 pipeline 异常。`first_sale_date()` 在 `data/datatools.py` 里的返回类型是 `Optional[str]`，而 `live.py` 用 `elif "error" not in result:` 判断工具是否失败。 |
+| **假设** | `result is None` 时 `"error" not in None` → `TypeError`；`result` 是字符串时 `"error" not in "2026-08-01"` 恰好不抛但语义错（把日期字符串当成"没有 error 的结果"）。 |
+| **验证实验** | 合成测试直接复现：旧实现在 `kbqa/live.py:119` 抛 `TypeError: argument of type 'NoneType' is not iterable`（红输出原文见 `docs/_r2_red.txt`）。另一条断言 `service.run_tool("first_sale_date", {...})` 返回 `dict`：修复前拿到的是裸字符串 `'2026-05-01'`。 |
+| **根因** | 工具边界只对 `search_kb` 与"多数数据工具"（返回 dict）成立；scalar 类工具漏在外。没人规定"没有查到"该怎么表达，于是 `None` 既可能表示"没数据"，也可能被上层理解成"工具坏了"。 |
+| **修复** | `a601ff7`。`service._as_json_object()` 在边界统一：dict 原样；scalar → `{"value": ...}`；None → `{"value": null}`（成功但无数据）；失败 → `{"error": ...}`。`live.py` 也做同款兜底，保证 LiveEngine 永远拿到可检查、可序列化的 JSON object。 |
+| **回归测试** | `test_run_tool_normalises_scalar_and_none` / `test_scalar_tool_result_does_not_crash_live_loop`。**修复前红**（`4cc3732`，含真实 TypeError）；修复后绿。 |
+
+---
+
+## 缺陷 #42：证据是"调用过就全部输出"，且与调用顺序绑定【泛化 R2 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `data_evidence` 的语义实际上是"Tool Call History"：工具一被调用就把 result 直接 append 进证据。于是①最终回答根本没用到的宽查询（`by_store`、`top_products(limit=30)`）照样占证据预算；②谁先调用谁先占掉 60 个数字的全局额度，**精确查询反被饿死**；③宽列表投影只会"从后半部分砍掉"，留着回答用不到的字段（`refund`/`aov`/`category`/`district`…）。 |
+| **假设** | ① `evidence.append(...)` 在工具返回处立即发生，没有"最终答案产生后再选证据"这一步（**成立**）；② 收口函数 `_trim_longest_list` 只按长度砍，不看回答用了什么（**成立**）。 |
+| **验证实验** | 三条合成测试：调三个数据工具但回答只用一个的数字 → 旧实现证据带 3 条（应 1 条）；`broad → exact` 与 `exact → broad` 两种顺序 → 旧实现选出的证据集合不同且都拿不到回答用到的数字；`by_store` 5 店 × 多指标、回答只用 `qty` → 旧实现保留全部字段。 |
+| **根因** | 缺少"最终答案 → 支持它的最小事实集合"这一步；证据的形态由调用历史决定，而不是由回答决定。 |
+| **修复** | `a601ff7`。`ledger.select_evidence()`：在最终答案确定后选择证据。信号全部 generic（不看题号）：是否覆盖最终回答的经营数字、params 与 `plan.store_id/product_id/window` 是否对齐、更具体优先、结果更小优先；排序键含 `receipt_id`，所以**结果与调用顺序无关**。投影按回答实际用到的字段收敛，且始终满足单条 ≤4096 字节、合计 ≤60 数字。 |
+| **回归测试** | `test_evidence_contains_only_answer_supporting_receipts` / `test_evidence_selection_is_order_independent` / `test_broad_list_evidence_projection_keeps_needed_fields` / `test_trace_exposes_receipt_selection_and_validation`。**修复前红**（`4cc3732`）；修复后绿。 |
+
+---
+
 ## 附：现场调试演练计时（P5 §3，模拟评委 40 分钟环节）
 
 | 演练 | 题目 | 定位耗时 | 修复+回归测试 | 方法论回放 |

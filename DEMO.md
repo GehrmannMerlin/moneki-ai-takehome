@@ -219,6 +219,13 @@ export LLM_MODEL=deepseek-flash
 trace 的「最终提示词 / 模型原始输出」里能看到完整请求与响应，
 思考内容（`reasoning_content`）只进 trace、不进 `answer`。
 
+> live 模式下 trace 还会多出几条**事实账本（fact ledger）**步骤——这是泛化 R2 加的：
+> `tool_receipt_created`（每次工具调用封成不可变回执）、`final_validation`（对回答里的
+> 数字做依据校验，记下通过/需要修复）、`repair_attempt`（失败时那次有界改写的结果）、
+> `evidence_selected` / `evidence_projected`（选给 API 的证据与投影后的体量）。
+> 凭这几条就能区分"模型答错"还是"我们的校验把对的改坏了"——见
+> `README.md` 的 live 作答权威架构图与 `LLM_SETUP.md` §8 第 4 条。
+
 再用代理看流量（契约 §7.5）：
 
 ```bash
