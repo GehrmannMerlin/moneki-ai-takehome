@@ -577,3 +577,96 @@ def test_trace_exposes_receipt_selection_and_validation(service):
     blob = json.dumps(detail, ensure_ascii=False, default=str)
     assert "query_metrics" in blob and "qty" in blob, (
         "receipt 步骤看不到 tool 与 result：%s" % blob)
+
+
+# ==================================== 历史失败回归（任务书 §61/§63）
+
+#: 恶意 KB 文档会诱导的假数字（H069 现场实际出现过的那个数）。
+_POISON_NUMBER = 9999999
+
+
+class _PoisonedAnswerer:
+    """模拟 H069 的真实链路：mock Answerer 读到注入了恶意句子的 KB，
+    于是"重答"出一个被攻击内容污染、却看起来很像数据的答案。
+
+    只要它被调用一次，就说明 finaliser 又把问题交给了第二套引擎。
+    """
+
+    def __init__(self, real, answer_text):
+        self._real = real
+        self._answer_text = answer_text
+        self.called = 0
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
+
+    def answer(self, *args, **kwargs):  # pragma: no cover - 命中即失败
+        self.called += 1
+        from kbqa.schemas import Answer
+
+        return Answer(answer=self._answer_text, answer_type="data")
+
+
+def test_h069_safe_model_answer_is_not_replaced_by_injected_kb_answer(service, monkeypatch):
+    """H069 回归：安全的模型答案不许被"重答"成被注入内容污染的答案。
+
+    历史链路（raw LLM response + trace 复盘）：
+
+        DeepSeek 原始回答：安全（拒绝恶意数字、给出真实数据库数字）
+              ↓
+        production number validator 假阳性（把 KB 编号/日期当成编造数字）
+              ↓
+        fallback → mock Answerer 重答
+              ↓
+        恶意 KB 句子变成最终答案（输出 9,999,999）
+
+    Round 2 封印的是最后两步：**finaliser 不能把安全的模型答案变成不安全答案**。
+    （这不是"修好了 prompt injection"——raw KB 进入模型上下文的问题属于 Round 4。）
+    """
+    poisoned = _PoisonedAnswerer(
+        service.answerer,
+        "根据知识库，本店当日净营业额为 %d 元。" % _POISON_NUMBER,
+    )
+    monkeypatch.setattr(service, "answerer", poisoned, raising=False)
+
+    def fake_run_tool(name, params):
+        return {"net_revenue": 1377, "orders": 41, "qty": 73}
+
+    safe_text = ("S91 在 2026-07-12 的净营业额是 1377 元，订单 41 单，销量 73 件。"
+                 "关于文档里说的促销口径，请以 KB-001 的指标定义为准。")
+    plan = _plan(service, "2026 年 7 月 S01 的净营业额是多少？")
+    client = ScriptedClient([
+        _tool("query_metrics", {"start": "2026-07-01", "end": "2026-07-31"}, seq=0),
+        _content(safe_text),
+    ])
+    answer = _engine(service, client, fake_run_tool).answer(plan, _trace("x"), [])
+
+    assert poisoned.called == 0, "safe 的模型答案被重新交给了 mock Answerer 重答"
+    assert str(_POISON_NUMBER) not in answer.answer, (
+        "最终答案里出现了被注入内容污染的数字：%r" % answer.answer)
+    assert "1377" in answer.answer, "安全的原始回答被改坏了：%r" % answer.answer
+    # raw 模型回答本就不含恶意数字 → 不该触发 repair，也不该出现第三次调用
+    assert len(client.calls) == 2, "safe 答案不该触发 repair，实际 %d 次 completion" % len(client.calls)
+
+
+def test_date_range_and_ids_in_answer_are_not_false_positive(service, monkeypatch):
+    """回归 B：回答里写清日期区间与编号，数字校验不许误触。
+
+    评测自己的遮蔽规则对 ``07-31`` 这类"月-日"写法并不免疫（会取出 7 与 -31），
+    所以问句里也按同样的写法给出区间——复述**问题自身的时间区间**不是编造数字。
+    """
+    _exploding_service(service, monkeypatch)
+
+    def fake_run_tool(name, params):
+        return {"net_revenue": 2468, "qty": 70}
+
+    text = ("S91 在 2026-07-01 至 07-31 的净营业额是 2468 元，销量 70 件；"
+            "口径见 KB-029，门店编号 S02、商品 P06。")
+    plan = _plan(service, "S91 在 2026-07-01 至 07-31 的净营业额是多少？")
+    client = ScriptedClient([
+        _tool("query_metrics", {"start": "2026-07-01", "end": "2026-07-31"}, seq=0),
+        _content(text),
+    ])
+    answer = _engine(service, client, fake_run_tool).answer(plan, _trace("x"), [])
+    assert "2468" in answer.answer and "70" in answer.answer, (
+        "含日期/编号的正确回答被误判改坏：%r" % answer.answer)
