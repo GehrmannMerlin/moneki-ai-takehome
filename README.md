@@ -53,21 +53,36 @@ cd starter && make setup PYTHON="py -3.12"  # 本机 python 不是 3.12 时
 ```
 </details>
 
-### 第 2 步：重建（清洗表 + 检索索引）
+### 第 2 步：重建（清洗表 + 检索索引 + 构建清单）
 
-**换数据或知识库只需要改这一条命令的两个目录参数。**
+**换数据或知识库只需要改这一条命令的目录参数。**
 
 ```bash
 cd starter
 .venv/Scripts/python -m kbqa.rebuild                     # Windows
 .venv/bin/python -m kbqa.rebuild                         # POSIX
 
-# 换一套数据 / 知识库：
-.venv/Scripts/python -m kbqa.rebuild DATA_DIR=/path/to/data KB_DIR=/path/to/knowledge_base
+# 换一套数据 / 知识库（三个目录都可以用环境变量整体替换）：
+.venv/Scripts/python -m kbqa.rebuild DATA_DIR=/path/to/data KB_DIR=/path/to/knowledge_base VAR_DIR=/path/to/var
 ```
 
-产物：`starter/var/clean.db`（清洗表）、`starter/.cache/index.json`（检索索引）。
-两个都在 `.gitignore` 里，**不入库**——索引必须能跟着知识库变。
+产物全部落在 `VAR_DIR`（默认 `starter/var/`）：
+
+| 产物 | 内容 |
+|---|---|
+| `var/clean.db` | 清洗表（全量行 + 双口径剔除标记） |
+| `var/index.json` | 检索索引（缓存键 = 知识库内容哈希，换库自动失效） |
+| `var/build_manifest.json` | 构建清单：数据指纹、知识库指纹、行数/文档数统计 |
+
+全部在 `.gitignore` 里，**不入库**——索引必须能跟着知识库变。
+
+**rebuild 的语义（R1 泛化轮起）**：
+
+- 两个**指纹**描述"当前产物到底从哪份输入建出来的"：
+  数据指纹 = 清洗算法版本 + `pos.db` 内容哈希；知识库指纹 = 索引算法版本 + 每个进索引文件的(相对路径, 内容哈希)。都不含本机绝对路径与 mtime，同内容跨目录指纹一致。
+- **新增/修改/删除/改名知识库文档**都会改变知识库指纹 → 旧索引缓存自动失效，`make rebuild`（乃至服务启动时的缓存加载）都会用当前知识库重建；无 KB 编号的说明文件（如 `README.md`）不进索引、不扰动指纹。
+- **服务启动防呆**：`clean.db` 存在不等于有效——启动时会校验它的数据指纹与当前 `DATA_DIR` 是否一致，不一致**直接报错**并提示执行 `make rebuild`，绝不静默拿旧数据答题。所以"换 `data/` 但忘了 rebuild"会在启动时就暴露，而不是算出一堆旧数字。
+- `make rebuild` 会打印两侧指纹、保留行数、文档数/片段数与告警，构建清单随产物落盘，方便现场核对。
 
 <details>
 <summary>用 <code>make</code> 的话</summary>
@@ -75,6 +90,7 @@ cd starter
 ```bash
 cd starter && make rebuild
 # 换库：make rebuild DATA_DIR=/path/data KB_DIR=/path/kb
+# 连产物目录一起换：make rebuild DATA_DIR=... KB_DIR=... VAR_DIR=...
 ```
 </details>
 
@@ -166,13 +182,15 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
                 ▼                                       ▼
 ┌───────────────────────────────┐     ┌─────────────────────────────────────┐
 │ 数据层（P1）                   │     │ 检索层（P2）                         │
-│ 清洗引擎：规范化 + 六规则剔除   │     │ Loader：.md/.txt/.html + GB18030     │
+│ 清洗引擎：规范化 + 七规则分类   │     │ Loader：.md/.txt/.html + GB18030     │
 │ 口径引擎：v3 现行 / v2 可选     │     │  → 标题感知切块 → jieba + BM25       │
 │ 11 个只读工具 / 只读 SQL       │     │  → 版本 as-of 过滤 → 先滤后取 top_k  │
 │            │                  │     │  → quote 从原文逐字截取              │
 │            ▼                  │     │            │                        │
-│      var/clean.db             │     │     .cache/index.json               │
+│      var/clean.db             │     │     var/index.json                  │
 │      （清洗后明细）             │     │     （键 = 知识库内容哈希）           │
+│            ▲                  │     │            ▲                        │
+│      var/build_manifest.json（两侧指纹 + 统计，启动校验防 stale 复用）          │
 └───────────────────────────────┘     └─────────────────────────────────────┘
                 ▲                                       ▲
                 │                                       │
@@ -190,7 +208,7 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 | 层 | 文件 | 现状 |
 |---|---|---|
 | HTTP | `kbqa/server.py` | 保留外壳，6 个契约接口都在 |
-| **数据** | **`kbqa/core/normalize.py`、`cleaning.py`、`metrics.py`、`datatools.py`** | **✅ P1 已重写**（六规则清洗 / v3+v2 口径引擎 / 只读数据工具） |
+| **数据** | **`kbqa/core/normalize.py`、`cleaning.py`、`metrics.py`、`datatools.py`、`manifest.py`** | **✅ P1 已重写 + R1 泛化加固**（七规则分类清洗 / v3+v2 口径引擎 / 只读数据工具 / 数据指纹与构建清单） |
 | **检索** | **`kbqa/core/textnorm.py`、`loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`** | **✅ P2 已重写**（四后缀加载 / GBK 降级 / HTML 剥标签 / 标题感知切块 / jieba / 内容哈希缓存键 / 先滤后取） |
 | 编排 | `kbqa/service.py`、`planner.py`、`answerer.py`、`live.py` | 待 P3 重写编排与安全闸 |
 | 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`sanitize.py` | starter 里这些比预期完整，P3 移植复用 |
@@ -232,15 +250,15 @@ v2 是**已废止**的旧版。评审隐藏题库会考"用对了哪一版"。v3
 
 另两条落实：**区间是闭区间**（starter 是右开区间，缺陷 #2）；客单价 `ROUND_HALF_UP` 两位。
 
-### 3.2 清洗：六条剔除规则，**按顺序首因归因**
+### 3.2 清洗：六条剔除规则 + 零金额分类，**按顺序首因归因**
 
-KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以六项计数加起来才等于总剔除数。
+KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以剔除计数相加等于总剔除数。
 
 | 规则 | 剔除数（独立复算） |
 |---|---|
 | 1 日期无法解析 / 日历非法 | 8 |
 | 2 `amount` 为空 | 150 |
-| 3 `qty <= 0` | 30 |
+| 3 `qty <= 0`（含无法按整数解析的小数 qty） | 30 |
 | 4 脏门店外键 | 10 |
 | 5 脏商品外键 | 40 |
 | 6 七字段完全重复 | 100 |
@@ -249,6 +267,14 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 **一个陷阱**：`'2026-13-45'` 能过 `YYYY-M-D` 正则但日历上不存在（3 行）。
 只靠正则会把它们留下来，`valid_sales_rows` 变成 18293，N01 就红。
 所以日期解析**必须过 `datetime.date` 构造校验**，不能只靠正则。
+
+**R1 泛化轮的两处口径明确**（公开数据里没有这两类行，公开分数不变；隐藏数据同结构，规则先行）：
+
+| 歧义点 | 采用的解释 | 依据 |
+|---|---|---|
+| `amount = 0` | **既不是销售行也不是退款行**，按新增的分类原因 `7_zero_amount` 剔除：不计入 `valid_sales_rows` / 订单 / 销量 / 营业额 | KB-001 §4 明确"销售行 `amount > 0`、退款行 `amount < 0`"，零金额两边都不是；§3 六条剔除没覆盖它，所以作为**分类阶段**的新原因排在规则 6 之后（先过剔除、再谈分类） |
+| 小数 `qty`（`1.5`） | **不能被 `int()` 静默截断成 1**：无法按整数解析即进剔除规则 3；整数值（`"3"`、`3`、`"3.0"`）合法 | KB-001 §2.4"qty 按整数解析" |
+| stale 产物 | `clean.db` 存在 ≠ 有效：服务启动校验数据指纹（清洗版本 + `pos.db` 内容哈希），与当前 `DATA_DIR` 不匹配就**明确报错要求 rebuild**（Strategy A，不做自动重建）——宁可响亮地失败，不悄悄用昨天的数据答今天的题 | 契约 §8"替换 data/ 后重建"；指纹与清单见 `core/manifest.py` |
 
 > 交接文档说"月底那几天的数字跟财务对不太上，差得不多，应该是四舍五入的事"。
 > 不是四舍五入——是右开区间丢了整个末日的数据，加上清洗压根没做。见 `DEBUG_LOG.md` 缺陷 #1、#2。
@@ -356,6 +382,7 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 | **P3** | 问答编排 + LLM 接入 + preflight（第三关 22 分） | ✅ **完成**（**100.00/100 全绿**，preflight P1–P14 全过） |
 | **P4** | 前端看板 + 对话栏 + 调试面板（第四关 8 分） | ✅ **完成**（100.00/100 保持，dist 入库零构建，`make regression` 可用） |
 | **P5** | 收尾验收 + 换库自验 | ✅ **完成**（干净 venv 终验 55/55、`swap_check` 换库自验通过、六份必交文件齐、防漏交/红线测试 6 条） |
+| **泛化 R1** | 数据/知识库**重建权威**：内容寻址指纹、build_manifest、stale 产物拒绝、`amount=0`/小数 qty 口径、索引产物收敛进 `VAR_DIR` | ✅ **完成**（泛化套件 38 条全绿；公开评测 100.00 保持；换库自验通过；见 `DEBUG_LOG.md` #33–#37） |
 
 ### P5 出口检查单
 
@@ -510,6 +537,9 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 | 标题感知切块 / 覆盖不变式 | `core/chunker.py::chunk_document` |
 | jieba 分词 + 别名挂词典 | `core/tokenizer.py::init_jieba`、`core/index.py::_prepare_tokenizer` |
 | 缓存键含知识库内容哈希 | `core/index.py::content_key` |
+| 数据指纹 / 构建清单 / stale 防呆 | `core/manifest.py`（`data_fingerprint` / `build_manifest.json`） |
+| 零金额行不算销售/退款 | `core/cleaning.py` 规则 `7_zero_amount` |
+| qty 严格整数（小数不截断） | `core/normalize.py::parse_qty` |
 | 先过滤后截取 top_k | `core/retriever.py::_allowed` + `search` |
 | 文档注入剥离（quote 仍用原文） | `core/retriever.py::Hit.dropped_instructions`、`core/sanitize.py` |
 | 通知优先于总表 | `core/retriever.py::_multiplier`（`NOTICE_BOOST` / `REFERENCE_PENALTY`） |

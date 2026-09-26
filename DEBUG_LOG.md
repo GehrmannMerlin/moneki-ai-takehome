@@ -567,6 +567,71 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+## 缺陷 #33：`amount = 0` 的行被当成有效销售行【泛化 R1 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 合成数据里放一行 `amount=0` 的明细，清洗后它被保留、`is_refund=0`，计入 `valid_sales_rows`，并通过 `COUNT(DISTINCT order_id)` 计入订单数、`qty` 计入销量。 |
+| **假设** | ① 规则 2 只挡"空金额"，零金额解析成 `cents=0` 不是 None，不命中剔除（**成立**）；② `is_refund` 判 `cents < 0`，零金额也不是退款（**成立**）——两边都不是却谁也没拦。 |
+| **验证** | `cleaning._first_reject` 逐条核对：`amount_cents == 0` 时六条剔除全不命中，行进入保留集；`metrics.summary` 的 orders/qty 聚合把它算进去。公开数据 0 行此类（`7_zero_amount: 0`），所以公开分数从未暴露。 |
+| **根因** | KB-001 §4 定义"销售行 `amount > 0`、退款行 `amount < 0`"，零金额两边都不是；§3 的六条剔除没覆盖它。实现把"通过剔除"直接等价于"有效行"，漏了 §4 的分类层。 |
+| **修复** | `1bd3a49`。通过六条剔除后若 `amount_cents == 0`，记新增分类原因 `7_zero_amount` 剔除（排在规则 6 之后——先过剔除、再谈销售/退款分类，与 §4 的表述顺序一致）；v2 口径同样剔除。README §3.2 记录口径取舍。 |
+| **回归测试** | `tests/generalization/test_data_cleaning.py::test_t_data_13_zero_amount_is_neither_sale_nor_refund`。**修复前红**（`c6fe71a`：`AssertionError: amount=0 的行被当成有效行保留了` + `orders==2`）；修复后绿，公开数据 18290 不变。 |
+
+---
+
+## 缺陷 #34：小数 `qty` 被 `int(Decimal)` 静默截断【泛化 R1 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `qty='1.5'` 的行清洗后被保留，qty 变成 1——小数被悄悄砍掉，既没进剔除台账，也不是原始数据。 |
+| **假设** | `normalize.parse_qty` 用 `int(number)` 转 Decimal，而 `int()` 是向零截断（**成立**：`int(Decimal('1.5')) == 1`）。 |
+| **验证** | `parse_qty('1.5')` 返回 1 而不是 None；`_clean` 后该行进保留集。公开数据的脏 qty 只有 `'-1'/'-2'`（走规则 3），无小数样本，公开分数从未暴露。 |
+| **根因** | KB-001 §2.4 说"qty 按整数解析"——`1.5` 根本不是整数，应当解析失败进剔除；`int()` 的截断语义把"解析失败"吞成了"解析成功但值变了"。 |
+| **修复** | `1bd3a49`。`parse_qty` 严格整数语义：`number != number.to_integral_value()` 即返回 None（进剔除规则 3）；整数值（`"3"`、`3`、`"3.0"`）照常通过。 |
+| **回归测试** | `tests/generalization/test_data_cleaning.py::test_t_data_08_fractional_qty_must_not_be_silently_truncated`。**修复前红**（`parse_qty('1.5') == 1`，行被截断保留）；修复后绿。 |
+
+---
+
+## 缺陷 #35：`Service(only_if_missing=True)` 静默复用旧 `clean.db`【泛化 R1 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `DATA_DIR=A` rebuild 过一次之后，把环境换成 `DATA_DIR=B` 直接起服务（不 rebuild）：服务正常启动、health 报 ok，但所有指标来自 A 的旧 `clean.db`——没有任何报错或提示。 |
+| **假设** | ① `clean.db 存在 → 跳过重建`（`service.py:47`，**成立**）；② 没有任何指纹/provenance 记录 clean.db 是从哪份数据建出来的（meta 表只存了源文件名 `pos.db`，换任何目录都同名，**成立**）。 |
+| **验证** | 合成数据 A（营业额 111）rebuild → 换 B（777）直接 `Service()`：`metrics_summary` 仍返回 111。这正是评审"替换 `data/` 后忘了 rebuild / 顺序错了"时会发生的静默错误答案。 |
+| **根因** | 重建产物没有来源指纹，"存在"被当成了"有效"。 |
+| **修复** | `1bd3a49`。新增 `core/manifest.py`：数据指纹 = 清洗算法版本 + `pos.db` 内容哈希（无路径/mtime）；rebuild 写 `build_manifest.json`；服务启动校验指纹，不匹配 **RuntimeError 明确要求 rebuild**（Strategy A，不做自动重建——官方流程本来就会先 rebuild，静默自动重建反而掩盖输入错误）。`server.py` 启动期即初始化，坏状态在 uvicorn 启动时暴露而不是第一个请求。 |
+| **回归测试** | `tests/generalization/test_data_replacement.py` 的 `test_service_refuses_stale_clean_db` / `test_manifest_missing_but_clean_db_present_refuses` / `test_rebuild_writes_build_manifest` / `test_data_fingerprint_tracks_content`。**修复前全红**（`c6fe71a`：无 RuntimeError、无 manifest 模块）；修复后绿。 |
+
+---
+
+## 缺陷 #36：索引缓存键含 mtime 与非索引文件——跨路径不确定、被说明文件扰动【泛化 R1 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | ① 同样的合成知识库复制到两个不同目录，`content_key` 不同；② 往知识库目录放一个 `README.md`（无 KB 编号、不进索引），缓存键变化触发重建。 |
+| **假设** | ① `content_key` 把 `st_mtime_ns` 与 `st_size` 卷进哈希——复制文件必然改变 mtime（**成立**）；② 它哈希目录下**所有**文件，包括 loader 明确跳过的无编号说明文件（**成立**）。 |
+| **验证** | T-KB-12：`make_kb` 到两个嵌套深度不同的目录 → 指纹不同；T-KB-05：加 `README.md`/`notes.txt` → 指纹变化。缓存行为本身仍正确（内容哈希在），但指纹不再描述"索引输入"，而是描述"目录状态"。 |
+| **根因** | P2 修 D11 时把"内容参与哈希"做成了"目录元数据 + 内容都参与"。mtime 对**正确性**是冗余的（内容哈希已覆盖一切变化），对**确定性**是有害的（复制/同步工具都会改它）。 |
+| **修复** | `4d59e4a`。`content_key` 只由实现版本 + **进索引文件**的(相对路径, 内容 sha256) 决定；"进不进索引"用 `loader.candidate_doc_id` 判定——与 `load_document` 同一判据（支持的后缀 + 文件名 KB 编号或 md frontmatter 声明的 doc_id）。`INDEX_VERSION` bm25-4 → bm25-5，旧缓存自然失效。 |
+| **回归测试** | `tests/generalization/test_kb_mutation.py::test_t_kb_05_non_document_files_ignored` / `test_t_kb_12_fingerprint_independent_of_absolute_path`（另有 `test_t_kb_11_fingerprint_deterministic` 封印确定性）。**修复前红**（`c6fe71a`）；修复后绿。 |
+
+---
+
+## 缺陷 #37：索引缓存固定写 `starter/.cache/`，`VAR_DIR` 隔离失效【泛化 R1 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `VAR_DIR=/tmp/xxx make rebuild` 后，`clean.db`/`build_manifest.json` 都进了 `/tmp/xxx`，唯独索引仍写 `starter/.cache/index.json`——两个 VAR_DIR 共享一个索引文件，互相覆盖。 |
+| **假设** | `Settings.index_path` 硬编码 `PROJECT_DIR / ".cache" / "index.json"`，与 `var_dir` 无关（**成立**，`config.py:51`）。 |
+| **验证** | VAR_DIR=A（KB-A）rebuild → VAR_DIR=B（KB-B）rebuild → A 的目录里根本没有 index.json，两套知识库共享 `.cache/index.json`（靠内容键碰巧不串答案，但产物隔离不成立；公开仓库若残留 `.cache`，评审临时目录换库后第一次启动会白建一次索引，更糟的情况是旧实现键不变时直接复用旧知识）。 |
+| **根因** | 历史决策"索引缓存跟着仓库走，clone 即可用"与"产物统一由 VAR_DIR 管理"冲突；`.cache` 位置在 P0 从版本库删过一次，但路径本身没收敛。 |
+| **修复** | `4d59e4a`。`Settings.index_path` → `var_dir / "index.json"`：三个产物（clean.db / index.json / build_manifest.json）全部由 VAR_DIR 隔离。 |
+| **回归测试** | `tests/generalization/test_rebuild_paths.py::test_custom_paths_rebuild_and_service` / `test_var_dir_isolation` / `test_fresh_process_uses_var_dir_artifacts`（真子进程起 uvicorn 验证 fresh process）。**修复前红**（`c6fe71a`：`VAR_DIR 里缺产物 index.json` / `varA/build_manifest.json 不存在`）；修复后绿。 |
+
+---
+
 ## 附：现场调试演练计时（P5 §3，模拟评委 40 分钟环节）
 
 | 演练 | 题目 | 定位耗时 | 修复+回归测试 | 方法论回放 |

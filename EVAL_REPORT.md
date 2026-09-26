@@ -573,6 +573,27 @@ mock 管线能答对，是因为 `Answerer._cause_block` 有"why 类 + 无解释
 
 ---
 
+## §7 Generalization Round 1 回归（重建权威重构后）：100.00 / 100（保持）
+
+> **这不是新的 live 评分**。R1 改的是数据/知识库重建层（指纹、manifest、
+> stale 拒绝、索引产物归位 VAR_DIR、amount=0 与小数 qty 口径），
+> 用公开题库验证"重构没有破坏任何已有能力"。
+
+| 项 | 值 |
+|---|---|
+| 模式 | **mock（未配 Key）** |
+| 命令 | `python eval/run_eval.py --base-url http://localhost:8011 --questions eval/public_questions.jsonl --out eval/_r1_regression`（服务以默认 `data/`+`knowledge_base/` 重建后启动） |
+| 得分 | **100.00 / 100（55/55 全绿）**，十类全部满分 |
+| commits | 重构链 `c6fe71a`（红）→ `1bd3a49`（数据权威）→ `4d59e4a`（KB 权威）→ `3c4f33b`（全周期彩排） |
+| 单元测试 | `pytest tests` → **272 passed, 0 failed**（新增泛化套件 38 条：清洗泛化 13、数据替换/指纹 6、KB mutation 12、路径/隔离/fresh process 3、anti-hardcode 3、全周期彩排 1） |
+| 换库自验 | `scripts/swap_check.py` 全绿（变体数据 + 变体 KB → 真实服务端到端：改过的数字进回答、新文档可检索、旧数字消失） |
+| 全周期彩排 | `tests/generalization/test_mutation_rehearsal.py`：连续五轮 fresh process（初始 → 改正文 → 增文档 → 删文档 → 数据 111→777），全部按"停服务 → 改输入 → rebuild → 起新服务"走 |
+
+R1 的验收问题（换数字/换 KB/换路径是否零代码改动成立）逐条 YES，
+证据见 `DEBUG_LOG.md` #33–#37 与 `tests/generalization/`。
+
+---
+
 ## 附：怎么复现这张表
 
 ```bash
