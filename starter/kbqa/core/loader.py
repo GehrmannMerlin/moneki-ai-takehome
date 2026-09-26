@@ -210,6 +210,33 @@ def _sorted_unique(values) -> list[str]:
     return sorted({value.upper() for value in values})
 
 
+def candidate_doc_id(path: Path) -> Optional[str]:
+    """轻量判定：这个文件会不会被当成知识库文档（与 `load_document` 同一判据）。
+
+    供 `index.content_key` 用——指纹必须只描述**真正进索引的输入**：
+    无 KB 编号的说明文件（`README.md`、`notes.txt`）不该扰动缓存键。
+    不做切块、不做正文抽取，只回答"它算不算一篇文档、doc_id 是什么"。
+    """
+    suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        return None
+    match = _DOC_ID.match(path.name)
+    if match:
+        return match.group(1)
+    # 文件名没有编号时，只有 .md 的 frontmatter 能声明 doc_id（与 load_document 一致）
+    if suffix in (".md", ".markdown"):
+        try:
+            raw = path.read_bytes()
+        except OSError:                                   # pragma: no cover
+            return None
+        text, _ = decode_bytes(raw)
+        meta, _ = parse_front_matter(text)
+        declared = str(meta.get("doc_id") or "").strip()
+        if declared:
+            return declared
+    return None
+
+
 def load_document(path: Path) -> Optional[Document]:
     """读一个文件。不是知识库文档（没有 KB 编号）时返回 None。"""
     warnings: list[str] = []

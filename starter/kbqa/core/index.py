@@ -11,7 +11,10 @@ digest.update(("%s|%s|%s\\n" % (INDEX_VERSION, CHUNKER_VERSION, TOKENIZER_VERSIO
 
 `kb_dir` 只出现在签名里。连带后果：`.cache/index.json` 被提交进仓库，
 评委换 `knowledge_base/` 后缓存键不变、命中旧缓存，服务拿**上一套知识库**答题。
-现在的键 = 版本常量 + 每个文件的(相对路径, 大小, mtime_ns, 内容 sha1)。
+
+R1 起键进一步收紧为**内容寻址**（详见 `content_key` 的 docstring）：
+版本常量 + 每个进索引文件的(相对路径, 内容 sha256)——不含 mtime/size/绝对路径，
+无编号的说明文件也不参与。同库跨目录指纹一致，改一字即失效。
 """
 
 from __future__ import annotations
@@ -28,32 +31,37 @@ from .chunker import CHUNKER_VERSION, Chunk, chunk_documents
 from .loader import Document, load_knowledge_base
 from .tokenizer import TOKENIZER_VERSION, tokenize
 
-INDEX_VERSION = "bm25-4"
+INDEX_VERSION = "bm25-5"
 K1 = 1.5
 B = 0.75
 
 
 def content_key(kb_dir: Path) -> str:
-    """缓存键：版本常量 + 知识库**每个文件**的相对路径/大小/mtime/内容哈希。
+    """内容寻址指纹：实现版本 + **真正进索引的每个文件**（相对路径 + 内容哈希）。
 
-    内容哈希是关键那一项：只看 mtime 的话，`git checkout` 回一份旧文件
-    （mtime 变了但内容可能相同）会白重建；反过来，某些同步工具会保留 mtime，
-    只改内容——那就漏重建了。三项一起算，两边都不吃亏。
+    属性（R1 泛化要求）：
+
+    * **只由内容与相对结构决定**——不含绝对路径、不含 mtime、不含文件大小。
+      同样的知识库复制到任何目录指纹一致；改一个字、增删改名一个文件必然改变；
+    * **只描述参与索引构建的输入**——无 KB 编号的说明文件（README.md 等）
+      不进指纹（`loader.candidate_doc_id` 判定，与 loader 同一判据）；
+    * add / modify / delete / rename 全部改变指纹 → 缓存自动失效，旧索引不可能被复用。
     """
+    from .loader import candidate_doc_id
+
     digest = hashlib.sha256()
     digest.update(("%s|%s|%s\n" % (INDEX_VERSION, CHUNKER_VERSION, TOKENIZER_VERSION)).encode())
     root = Path(kb_dir)
     if not root.exists():
         digest.update(b"<missing>")
         return digest.hexdigest()
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        if path.name.startswith("."):
+    for path in sorted(p for p in root.rglob("*")
+                       if p.is_file() and not p.name.startswith(".")):
+        if candidate_doc_id(path) is None:
             continue
-        stat = path.stat()
-        digest.update(("%s|%d|%d|" % (
-            path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns)).encode())
-        digest.update(hashlib.sha1(path.read_bytes()).hexdigest().encode())
-        digest.update(b"\n")
+        digest.update(("%s\0%s\n" % (
+            path.relative_to(root).as_posix(),
+            hashlib.sha256(path.read_bytes()).hexdigest())).encode())
     return digest.hexdigest()
 
 

@@ -47,8 +47,10 @@ class Settings:
 
     @property
     def index_path(self) -> Path:
-        # 索引缓存跟着仓库走，clone 下来就能直接起服务，不用等建索引。
-        return PROJECT_DIR / ".cache" / "index.json"
+        # R1：索引是 VAR_DIR 的产物之一，必须跟着 VAR_DIR 走——
+        # 评审换临时目录时绝不能读到公开仓库留下的 .cache；
+        # 两个 VAR_DIR 之间产物完全隔离。内容寻址键保证换 KB 后自动失效。
+        return self.var_dir / "index.json"
 
     @property
     def live(self) -> bool:
