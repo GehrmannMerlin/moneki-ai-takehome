@@ -648,6 +648,94 @@ R2 的目标不是"再多做对几道题"，而是"模型已经答对时，系�
 
 ---
 
+## §9 Generalization Round 3 回归（Structured Planner Authority）
+
+> **这不是新的 live 评分**。R3 改的是**规划权威**（一个问句 → 一份 canonical Plan、
+> 不变量与 provenance、结构化下传给 live、PlanToolPolicy 约束工具范围、否定感知排行、
+> 编号/月份解析边界）。本节的分数用来验证"收敛规划权威没有破坏任何已有能力"。
+> 自补题库与 scripted 回归**不属于官方分数**，已明确区分。
+
+| 项 | 值 |
+|---|---|
+| 官方公开 mock | **RUN** —— `100.00 / 100.00（55/55 全绿）`，十类全部满分（命令见下） |
+| 官方公开 live | **NOT RUN** —— 本轮环境没有配置 `LLM_API_KEY`（`LLM_BASE_URL`/`LLM_MODEL` 亦未配置；**不伪造** live 结果） |
+| 自补题库（`moneki_extra_hybrid_eval_bank.*`，用户文件，只读） | **NOT RUN** —— 不以 extra 总分为完成条件 |
+| scripted 回归（`tests/generalization/test_planner_authority.py`） | **RUN** —— 34 条全绿（**29 条 RED→GREEN** + **5 条反向护栏**始终为绿） |
+| 泛化套件合计（R1+R2+R3） | **RUN** —— `pytest tests/generalization` → **90 passed** |
+| 单元/后端测试 | `pytest tests` → **324 passed, 0 failed**（R2 基线 290 + R3 新增 34）；`--junitxml` 复核 **tests=324 failures=0 errors=0 skipped=0** |
+| LLM gateway preflight（P1–P14） | **RUN** —— 14/14 通过（见 §9.2） |
+| 换库自验（anti-hardcode） | **RUN** —— `scripts/swap_check.py` 全绿（变体数据 + 变体 KB → 缓存键变化、新文档可检索、改过的数字进回答、旧数字消失、端到端不写死） |
+| git `diff --check` | 无空白错误 |
+
+### §9.1 官方公开 mock（RUN）
+
+```bash
+# 服务以 mock 模式启动（不注入 LLM_* 环境变量）
+cd starter && .venv/Scripts/python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000
+# 题库（从仓库根目录）
+python eval/run_eval.py --base-url http://localhost:8000 \
+    --questions eval/public_questions.jsonl --out eval/_r3_mock
+```
+
+结果：`总分 100.00 / 100.00（100.0%）`，55/55 全绿，十类满分，
+与 §7（R1）、§8（R2）的基线一致 → **无回退**。报告原件 `eval/_r3_mock/report.json`。
+
+### §9.2 LLM gateway preflight（RUN）
+
+沿用项目既有流程（`eval/llm_gateway.py` 自带假模型服务，不需要真实 Key）。
+本轮把它包成一条命令（`eval/preflight_driver.py`：起假模型 → 用注入的三个环境变量重启
+服务 → 检查 → 写报告），省掉两个终端互等：
+
+```bash
+# 从仓库根目录（Git Bash 需加 MSYS_NO_PATHCONV=1，见 LLM_SETUP §7.5 的踩坑记录）
+MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver.py
+```
+
+结果：**P1–P14 全部通过（`PREFLIGHT_PASSED=True`）**。关键几项与 R2 一致、无退化：
+
+| 编号 | 检查项 | 结果 | 实测说明 |
+|---|---|---|---|
+| P1 | 请求确实发到注入的 `LLM_BASE_URL`（含路径前缀） | 通过 | 共观察到 60 次 `POST /ds-gw/chat/completions`。 |
+| P7 | 工具定义规范，且每个工具调用以 `role=tool` + `tool_call_id` 回传 | 通过 | 44 个工具调用的结果都正确回传。 |
+| P8 | 每个场景 `/api/chat` 返回 200 与字段完整 JSON | 通过 | 32 次问答全部 200 + 字段完整。 |
+| P11 | 在时限内返回（含长时无响应场景） | 通过 | 最慢 123.50 秒（`hang` 场景 read 超时），都在 180 秒以内。 |
+| P13 | 多轮之间 `reasoning_content` 原样回传（未触发 400） | 通过 | 18 次多轮请求都原样回传了 `reasoning_content`。 |
+
+报告原件 `eval/_r3_preflight/preflight_report.md`。
+**R3 对协议层零改动**（改的是规划与作答传导），这 14 项复跑通过说明
+"结构化 plan context 追加进同一条 system 消息"没有破坏 DeepSeek 兼容性：
+P4 仍然只出现文档列出的顶层参数，P10 思考标记仍只进 trace、不进
+`answer`/`citations`/`data_evidence`。
+
+### §9.3 脚本化回归：RED 到 GREEN 的证据链
+
+R3 的红测试先提交（`8ebff2c`，**29 failed / 5 passed**，红输出存档 `docs/_r3_red.txt`），
+实现后 34 条全绿。5 条"始终为绿"的是**反向护栏**，用来防止"为了修否定而把真排行也修坏"：
+
+| 护栏 | 断言 |
+|---|---|
+| `test_dynamic_catalog_and_alias` | 换一套目录（新门店/新商品/新别名）不改代码也能解析 |
+| `test_regression_explicit_scope_all_parsed` | 显式写出的门店/商品/窗口/指标全部被解析出来 |
+| `test_regression_by_store_dimension` | `by_store` 仍是"哪家最高"，没被 Plan 的 store 限死 |
+| `test_regression_compare_keeps_two_windows` | 两期对比的两个窗口都保留 |
+| `test_true_ranking_still_works` | by_store / top_products / category 三分派照旧 |
+
+与 §8（R2）逐项对比**无退化**：公开 mock 仍 100/100、泛化套件仍全绿、
+preflight 仍 14/14、换库自验仍通过。缺陷根因与修复见 `DEBUG_LOG.md` #43–#51。
+
+### §9.4 定向 live 复验（NOT RUN —— 未配置 Key）
+
+按 R3 的目标（规划权威与工具范围），一旦配置 `LLM_API_KEY`，建议定向复验
+`H001 / H025 / H029 / H047 / H071`，判断标准是：
+
+* trace 里 `plan` **只有一个**（不再出现"planner=X → 最终=Y"的二次改写）；
+* 工具 `params` 与 `plan.resolved_scope` 对齐，或出现 `tool_scope_rejected` 且模型随即改正；
+* H071 这类**反差句**（"A 最多不代表 B 最高"）不再被答成排行。
+
+本机没有可用真实 Key（`LLM_API_KEY` 未配置），**不伪造**任何 live 数字。
+
+---
+
 ## 附：怎么复现这张表
 
 ```bash

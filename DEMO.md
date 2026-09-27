@@ -43,7 +43,7 @@ cd starter
 
 > **618 当天 S02 的牛肉poke 卖了多少份？达到目标了吗？**
 
-实测回答（`answer_type = hybrid`，耗时 14.6 ms）：
+实测回答（`answer_type = hybrid`，耗时 77.7 ms，分步 trace 见 §4）：
 
 > 2026-06-18（S02 Makai Poke）（牛肉poke）：销量 125 件，净营业额 3625.00 元，
 > 有效订单数 53 单，客单价 68.40 元，退款金额 0.00 元。
@@ -121,19 +121,24 @@ cd starter
 
 ## 4. 调试面板：答错了怎么 30 秒定位
 
-回答下方点 **「查看 trace」** → 全屏覆盖层。以第 2 节那道题为例，实测 `trace t-20260901-0054`：
+回答下方点 **「查看 trace」** → 全屏覆盖层。以第 2 节那道题为例，实测 trace（`t-20260901-0003`）：
 
 **① 分步耗时**（一眼看出慢在哪）
 
 ```
-guard         at=  1.1ms  took=  1.1ms
-plan          at=  4.6ms  took=  3.1ms
-period_gate   at=  4.6ms
-intent        at=  4.8ms
-search        at=  8.6ms  took=  2.9ms
-answer_mock   at=  8.9ms  took=  4.1ms
-response      at= 14.6ms
+guard         at=  0.7ms  took=  0.7ms
+plan          at=  4.3ms  took=  3.3ms
+search        at=  8.3ms  took=  3.1ms
+answer_mock   at=  8.6ms  took=  4.3ms
+response      at= 77.7ms
 ```
+
+> **泛化 R3 起，`period_gate` 与 `intent` 不再作为独立步骤出现**——它们已经收进
+> `plan`（规划权威收敛，见 README「规划权威：一次问句 → 一份 canonical Plan」）。
+> 以前那句问句会被规划**两次**：`plan` 判 `data/target`，随后 `intent` 步骤又把它
+> 改成 `hybrid/price`。现在 trace 里只有**一次**规划；改写（如果发生）在 Planner
+> 内部完成，并如实写进 `plan.notes`：`意图复核：planner=data/target → 最终=hybrid/target`。
+> **步骤变少不是信息变少**，是"双头规划"这个现场最难解释的故障从结构上消失了。
 
 **② 改写后的检索查询**（规划器给它补了什么）
 
@@ -177,6 +182,30 @@ starter 截到 4000 字，导致 trace 里看不到全貌）。体积超 256KB �
 
 **⑤ 错误**：`errors: 0`。任何内部异常都会在这里留下类型、消息、堆栈。
 
+**⑥ `plan` 步骤里的槽位来源（泛化 R3 新增）**：`plan.detail` 多了一个 `provenance`
+字段，标出 `store` / `product` / `window` / `metric` 各自**是怎么来的**：
+
+| 来源 | 含义 | 本题取值 |
+|---|---|---|
+| `explicit` | 用户在这一句里说出来的 | `store=S02`、`product=P06`、`window=618`、`metric=qty` 均为 explicit |
+| `inherited` | 从上一轮追问继承来的 | （本轮没有） |
+| `derived` | 由别的信息推导出来的（比如"上个月"推出具体月份） | — |
+| `default` | 用户没提，落到默认口径（如全区间） | — |
+| `none` | 这一维**没有被限定**（例如问排行时门店本就该开放） | — |
+
+```json
+"provenance": {"store": "explicit", "product": "explicit",
+               "window": "explicit", "metric": "explicit"},
+"intent": "hybrid", "kind": "target", "needs_data": true, "needs_docs": true
+```
+
+**为什么这个字段值钱**：它回答了现场最常被问的那句"这个门店是谁说的？"。当
+`store=none` 时，说明用户根本没提门店（可能是在问"哪家最高"，门店本就该开放）；
+当 `store=explicit/inherited` 时，说明应用明确解析出了门店——此时如果 live 模型
+在工具调用里换成别的门店，会被 `PlanToolPolicy` **拒绝执行**并在 trace 里留下
+`tool_scope_rejected`（含 `field` / `expected` / `received`）。**"模型漂移"与
+"数据库算错"从此可以一眼分开。**
+
 ---
 
 ## 5. 怎么证明上面这些不是编的
@@ -196,6 +225,11 @@ cd starter && .venv/Scripts/python scripts/swap_check.py
 
 # ④ 两个题库的原始报告
 #    公开：eval/_p4_check/report.json      自补：eval/_p4_extra/report.json
+
+# ⑤ 泛化轮次的回归证据
+#    公开 mock 满分（R3）：eval/_r3_mock/report.json
+#    接入预检 P1–P14（R3）：eval/_r3_preflight/preflight_report.md
+#    红测试输出存档：docs/_r3_red.txt（29 failed / 5 passed，gitignore 不入库）
 ```
 
 第 ③ 条最值得现场演示：它把 `data/` 与 `knowledge_base/` 换成变体
@@ -225,6 +259,18 @@ trace 的「最终提示词 / 模型原始输出」里能看到完整请求与�
 > `evidence_selected` / `evidence_projected`（选给 API 的证据与投影后的体量）。
 > 凭这几条就能区分"模型答错"还是"我们的校验把对的改坏了"——见
 > `README.md` 的 live 作答权威架构图与 `LLM_SETUP.md` §8 第 4 条。
+>
+> 泛化 R3 再加两条**工具范围**步骤：`tool_scope_normalized`（PlanToolPolicy 按 Plan
+> 补齐了模型省略的参数，含 `filled` / `effective`）与 `tool_scope_rejected`
+> （模型把门店/商品/时间窗换成了 Plan 之外的值 → **拒绝执行**，含 `field` /
+> `expected` / `received` / `message`）。于是"模型有没有偏离已解析的范围"在 trace 里
+> 是一条可数的线：没有这两步 = 模型完全按 Plan 取数；出现 `tool_scope_normalized`
+> = Plan 替模型补了参数；出现 `tool_scope_rejected` = 模型漂移过、被拦下。
+> Trace 的 `tool` 步骤同时记 `params`（**实际执行**）与 `proposed`（模型原本提议），
+> 两者不一致时一定是上面两步之一造成的。
+> 演示建议：问一句"**7 月 S02 的营业额为什么比别的周低**"（真 hybrid），
+> 既能看到 `plan` 一次成型（不再有 `period_gate`/`intent` 二次步骤），
+> 也能看到数据半边与文档半边各自的事实来源。
 
 再用代理看流量（契约 §7.5）：
 

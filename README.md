@@ -175,8 +175,9 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
                                         │
                                         ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  编排层（P3）：安全闸 → 意图/时间解析（锚 2026-09-01）→ 区间闸 → 槽位继承   │
-│                 → 并行工具执行 → 模板渲染 → 上限收口 → trace 落库           │
+│  规划层（R3 唯一权威）：安全闸 → 追问还原 → 意图/时间/实体/指标解析（锚 2026-09-01）│
+│                          → 区间闸 → 意图复核 → _finalize（needs+provenance+不变量）│
+│  编排层（P3）：一份 canonical Plan → 并行工具执行 → 模板/模型渲染 → 上限收口 → trace │
 └───────────────┬───────────────────────────────────────┬───────────────────┘
                 │                                       │
                 ▼                                       ▼
@@ -210,12 +211,84 @@ PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无�
 | HTTP | `kbqa/server.py` | 保留外壳，6 个契约接口都在 |
 | **数据** | **`kbqa/core/normalize.py`、`cleaning.py`、`metrics.py`、`datatools.py`、`manifest.py`** | **✅ P1 已重写 + R1 泛化加固**（七规则分类清洗 / v3+v2 口径引擎 / 只读数据工具 / 数据指纹与构建清单） |
 | **检索** | **`kbqa/core/textnorm.py`、`loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`** | **✅ P2 已重写**（四后缀加载 / GBK 降级 / HTML 剥标签 / 标题感知切块 / jieba / 内容哈希缓存键 / 先滤后取） |
-| 编排 | `kbqa/service.py`、`planner.py`、`answerer.py`、`live.py`、**`ledger.py`** | **✅ P3 已重写 + R2 收敛 live 作答权威**（`LiveEngine` 走 `FactLedger`：canonical receipt / model projection / evidence projection 三分；finaliser 只校验、不重答） |
+| **规划** | **`kbqa/planner.py`、`toolpolicy.py`** | **✅ R3 收敛为唯一规划权威**（一个问句 → 一份 canonical `Plan`：`validate()` 钉不变量、`provenance` 记槽位来源、`as_model_context()` 下传 live；`PlanToolPolicy` 把工具调用约束在已解析 scope 内） |
+| 编排 | `kbqa/service.py`、`answerer.py`、`live.py`、**`ledger.py`** | **✅ P3 已重写 + R2 收敛 live 作答权威 + R3 消费 canonical Plan**（`LiveEngine` 走 `FactLedger`：canonical receipt / model projection / evidence projection 三分；finaliser 只校验、不重答；Answerer 不再二次分类、不再看 `slots["two_part"]`） |
 | 问答 | `kbqa/docfacts.py`、`units.py`、`render.py`、`entities.py`、`timeparse.py`、`sanitize.py` | starter 里这些比预期完整，P3 移植复用 |
 | 模型 | `kbqa/llm.py`、`toolspec.py` | 待 P3 按契约 §7 复核；接入说明见 [`LLM_SETUP.md`](LLM_SETUP.md) |
 | 基建 | `scripts/baseline_report.py`、`tests/` | P0 建；P1/P2 用 `tests/defects/` 做缺陷复现，`tests/test_metrics.py` / `test_api_metrics.py` 做回归 |
 | ~~旧模块~~ | ~~`kbqa/tools.py`、`kbqa/cleaning.py`~~ | **已删除**（`1ec0f56`） |
 | ~~旧模块~~ | ~~`kbqa/loader.py`、`chunker.py`、`tokenizer.py`、`index.py`、`retriever.py`、`aliases.py`、`sanitize.py`~~ | **已删除**（P2 `fdd3774`），被 `kbqa/core/` 取代 |
+
+### 规划权威：一次问句 → 一份 canonical Plan（泛化 R3）
+
+R2 收敛了 live 的**事实与作答**权威；R3 收敛的是**规划**权威。
+在这之前，"这句话在问什么"有两套答案：`Planner` 解析一遍，`Service` 在它返回之后
+又跑一次意图复核，还能顺手改写 `intent`/`kind`——等于两个 planning 权威互相打架
+（缺陷 #43、#44）。现在只有一个：
+
+```text
+ question + history
+        │
+        ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │ Planner.plan()                        ← 唯一的规划权威        │
+ │   追问还原 → 时间/实体/指标解析 → 区间闸 → 意图复核            │
+ │   → _finalize()：needs 由 intent 派生 + provenance + 不变量   │
+ └──────────────────────────────────────────────────────────────┘
+        │  一份 canonical Plan（语义终态，此后只读）
+        ├───────────────► Answerer            （mock / 无 Key：按 intent 分支渲染）
+        ├───────────────► LiveEngine          （live：结构化 plan 下传 + 工具范围策略）
+        └───────────────► trace["plan"]       （现场可复现"它到底怎么理解的"）
+```
+
+**Plan 的不变量**（`Plan.validate()`，违反即 `AssertionError`，不静默修）：
+
+| intent | needs_data | needs_docs |
+|---|---|---|
+| `data` | ✅ | — |
+| `doc` | — | ✅ |
+| `hybrid` | ✅ | ✅ |
+| `refusal` / `clarify` | — | — |
+
+`needs_data` / `needs_docs` **只由 `intent` 派生**，所以"intent=doc 却 needs_data=True"
+这种自相矛盾在结构上不可能出现（R3-D2）。
+
+三件事保证权威不被绕开：
+
+1. **Service 不再规划**（R3-D1）：`_answer` 只剩 `plan → trace → engine`；
+   `core.routing.apply_intent` 已删除，第二权威没有落脚点。
+2. **live 拿到的是结构化 Plan，不是自然语言**（R3-D4）：`Plan.as_model_context()`
+   把 `resolved_scope`（window / compare_window / as_of / store_id / product_id /
+   metric）以 JSON 追加进 system 消息，模型不必、也不该再猜一遍。
+3. **工具调用被约束在 Plan 的 scope 内**（R3-D5）：`PlanToolPolicy` 按**工具语义**
+   声明每个维度是补齐（`fill`）/ 只查冲突（`enforce`）/ 不约束（`False`），
+   冲突的调用拒绝执行并把结构化错误回给模型。详见下表。
+
+**`slots["two_part"]` 退役**（R3-D3）：真 hybrid 现在直接 `intent="hybrid"`，
+不再"压成 data + 一个私有槽位让 Answerer 自己补文档"——行为一样，数据模型不再撒谎。
+
+**槽位 provenance**（R3-D7）：`store` / `product` / `window` / `metric` 各自标出
+`explicit` / `inherited` / `derived` / `default` / `none`。工具范围策略靠它区分
+"用户没提门店"（`none`，可能是在问排行，门店本就该开放）与"应用明确解析出了门店"
+（`explicit`/`inherited`，此时模型换门店就是漂移）。
+
+#### 每个工具的维度语义（`kbqa/toolpolicy.py`）
+
+| 工具 | window | store | product | 说明 |
+|---|---|---|---|---|
+| `query_metrics` | fill | fill | fill | 核心取数，三维都补齐、冲突拒绝 |
+| `daily_metrics` | fill | fill | fill | 同上 |
+| `payment_mix` | fill | fill | — | 支付结构按店/期，不按单品 |
+| `top_products` | fill | fill | — | **维度展开**：不能再指定单品，否则"哪款最高"变成"这款是多少" |
+| `by_store` | fill | — | fill | **维度展开**：不能再指定门店 |
+| `by_store_category` | fill | — | — | 两个维度都在展开 |
+| `compare_periods` | fill (A/B) | fill | fill | A 用 `window`、B 用 `compare_window` |
+| `unit_price_check` | enforce | — | fill+strict | 只查需要的那段窗口；单品必须来自 Plan，不许模型发明 |
+| `first_sale_date` | — | — | fill+strict | 首次上架与窗口无关；单品必须来自 Plan |
+| `search_kb` | — | — | — | 检索词由模型组织，范围不受约束（R4 才动检索信任边界） |
+
+策略完全由 **Plan + 工具语义**决定，**没有任何针对具体题型的 if/else**，
+也没有写死任何门店/商品编号——`make swaptest` 换库后依旧成立。
 
 ### live 作答权威（泛化 R2 收敛）
 
@@ -415,6 +488,8 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 | **P4** | 前端看板 + 对话栏 + 调试面板（第四关 8 分） | ✅ **完成**（100.00/100 保持，dist 入库零构建，`make regression` 可用） |
 | **P5** | 收尾验收 + 换库自验 | ✅ **完成**（干净 venv 终验 55/55、`swap_check` 换库自验通过、六份必交文件齐、防漏交/红线测试 6 条） |
 | **泛化 R1** | 数据/知识库**重建权威**：内容寻址指纹、build_manifest、stale 产物拒绝、`amount=0`/小数 qty 口径、索引产物收敛进 `VAR_DIR` | ✅ **完成**（泛化套件 38 条全绿；公开评测 100.00 保持；换库自验通过；见 `DEBUG_LOG.md` #33–#37） |
+| **泛化 R2** | live **事实与作答权威**：ToolReceipt / FactLedger、model 与 evidence 投影分离、Finalisation Authority（校验失败只允许一次 bounded repair，不再交给第二套 Answerer） | ✅ **完成**（公开 mock 100.00 保持；preflight P1–P14 复跑全过；见 `DEBUG_LOG.md` #38–#42） |
+| **泛化 R3** | **规划权威**：一个问句 → 一份 canonical `Plan`（不变量 + provenance + 结构化下传）、`PlanToolPolicy` 约束工具范围、否定感知排行、编号/月份解析边界 | ✅ **完成**（泛化套件 90 条全绿、全量 324 passed；公开 mock 100.00 保持；preflight P1–P14 复跑全过；见 `DEBUG_LOG.md` #43–#49） |
 
 ### P5 出口检查单
 

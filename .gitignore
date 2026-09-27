@@ -8,6 +8,9 @@ venv/
 # 评测脚本跑出来的临时报告（eval/baseline_report.json 是有意入库的基线证据）
 eval/report.json
 eval/_r1_regression/
+eval/_r3_mock/
+eval/_r3_preflight/
+eval/_r3_*.xml
 eval/_fix*_raw/
 eval/_p*_raw/
 eval/_verify_raw/

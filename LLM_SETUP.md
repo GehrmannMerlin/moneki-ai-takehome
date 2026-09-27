@@ -107,12 +107,19 @@ live 模式还多了一层**事实溯源**（泛化 R2 引入，`steps` 数组�
 
 | trace `step` | 内容 |
 |---|---|
-| `tool` | 工具名与参数（模型请求了什么） |
+| `tool` | 工具名、**实际执行的参数**与模型**原本提议**的参数（`proposed`，R3 起） |
+| `tool_scope_normalized` | PlanToolPolicy 按 Plan 补齐了哪些参数（`status=filled` / `filled` / `effective`）（R3 起） |
+| `tool_scope_rejected` | 模型参数与已解析范围冲突 → **拒绝执行**，含 `field` / `expected` / `received` / `message`（R3 起） |
 | `tool_receipt_created` | `receipt_id` / `tool` / `params` / `numbers` / `result` 摘要 —— **模型看到的 canonical 事实** |
 | `final_validation` | 校验是否通过、哪些数字没有依据、回答里有几个数字 |
 | `repair_attempt` | 一次有界 repair 的结果（`valid` / `still_unsupported` / `no_budget` / `llm_error`） |
 | `evidence_selected` | 最终选进 `data_evidence` 的 receipt 集合（回答用了哪几条事实） |
 | `evidence_projected` | 投影后的数字总数与每条字节数（对齐评测 `evidence_hygiene`） |
+
+`trace["plan"]`（R3 起）就是那份 **canonical Plan**：`as_trace()` 额外带出
+`provenance`（`store` / `product` / `window` / `metric` 各自是
+`explicit` / `inherited` / `derived` / `default` / `none`），用来在调试面板里回答
+"这个门店是用户说的、还是上一轮继承的、还是根本没解析出来"。参考 `DEMO.md` §4。
 
 于是"模型为什么知道这个数字"可以在 trace 里一条线看下来：
 
@@ -344,6 +351,48 @@ Finalisation Authority 只在**正常作答路径**生效，模型不可用时�
 
 ---
 
+### 7.6 泛化 R3 后的复跑（2026-09-27）
+
+泛化 R3 收敛的是**规划权威**，并且第一次把**结构化 Plan 下传进 system 消息**
+（`Plan.as_model_context()` 以 JSON 追加进同一条 system，见 `kbqa/live.py` 的
+`PLAN_CONTEXT_HEADER`）。这一改动直接落在"发给模型的请求"上，所以必须复跑预检，
+确认三件事不退化：**只用了文档列出的顶层参数**（P4）、**思考内容不外泄**（P10）、
+**工具调用仍以 `role=tool` + `tool_call_id` 正确回传**（P7）。
+
+本轮把预检包成一条命令（`eval/preflight_driver.py`：起假模型 → 用注入的三个环境变量
+自动重启服务 → 检查 → 写报告），省掉"两个终端互相等回车"：
+
+```bash
+# 从仓库根目录；Git Bash 需加 MSYS_NO_PATHCONV=1（见 §7.5 坑 1）
+MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver.py
+```
+
+实测结论：**P1–P14 全部通过**（输出末尾 `PREFLIGHT_PASSED=True`）。报告原件
+`eval/_r3_preflight/preflight_report.md`。关键几项：
+
+| 编号 | 检查项 | 结果 | 实测说明 |
+|---|---|---|---|
+| P1 | 请求确实发到注入的 `LLM_BASE_URL`（含路径前缀） | 通过 | 共观察到 60 次 `POST /ds-gw/chat/completions`。 |
+| P4 | 只用了 DeepSeek 文档列出的顶层参数 | 通过 | **plan context 只是往 `messages[0].content` 里追加文本，没有新增任何请求参数**。 |
+| P7 | 工具定义规范，且每个工具调用以 `role=tool` + `tool_call_id` 回传 | 通过 | 44 个工具调用的结果都正确回传（含 PlanToolPolicy 拒绝时返回的结构化错误消息）。 |
+| P8 | 每个场景 `/api/chat` 返回 200 与字段完整 JSON | 通过 | 32 次问答全部 200 + 字段完整。 |
+| P10 | 思考内容没有漏进 `answer` / `citations` / `data_evidence` | 通过 | 32 次回答里，思考标记都没有出现在任何对外字段里。 |
+| P11 | 在时限内返回（含长时无响应场景） | 通过 | 最慢 123.50 秒（`hang` 场景 read 超时），都在 180 秒以内。 |
+| P13 | 多轮之间 `reasoning_content` 原样回传（未触发 400） | 通过 | 18 次多轮请求都原样回传了 `reasoning_content`。 |
+
+与 R2（§7.5）逐项对比**无退化**：空回答 / 超时 / 各档 HTTP 错误码仍全部降级为
+结构化 `refusal`（`answer_type=refusal`，`answer` 从不是空串）。
+
+**本轮踩坑（记录在此，免得下次再撞）：** 把"自动重启服务"写进复跑脚本后，
+脚本用 `netstat -ano` 找占端口的 PID，但 `subprocess.run(..., text=True)` 在
+中文 Windows 上按 GBK 解码、遇到 netstat 里的非 UTF-8 字节会在读线程里抛
+`UnicodeDecodeError`，于是 `stdout` 变成 `None`、脚本在 `kill_port()` 上崩掉
+（而假模型已经起来了，看起来像"预检自己坏了"）。改成
+`encoding="utf-8", errors="replace"` 即可。**"预检红了"先看脚本自己的输出解码，
+再看被测服务**——与 §7.2 那条踩坑同一个教训。
+
+---
+
 ## 8. 已知限制
 清楚但还没解决的，一并写在这里。
 
@@ -377,3 +426,15 @@ Finalisation Authority 只在**正常作答路径**生效，模型不可用时�
    DeepSeek 文档列出的顶层参数之内。若你们那边有异议，删掉它不影响功能。
 9. **trace 里超过 256KB 的字段会写文件、trace 存路径**（`var/llm_payloads/`）。
    正常一轮提示词只有几 KB，不会触发。
+10. **规划权威已收敛，但工具范围策略只覆盖"取数范围"**（泛化 R3）。Planner 返回的
+    Plan 是这一轮的语义终态，`PlanToolPolicy` 会拒绝与它冲突的取数调用；
+    `search_kb` 的**检索词仍由模型自己组织**（策略里是 `False`）——因为"检索信任边界"
+   （注入过滤 / 来源权威分级 / citation provenance）属于 **Round 4**，本轮不碰。
+    另外：**结构化 Plan 是"应用自己算出来的"，不是用户原文**——它在 system 消息里，
+    与 `search_kb` 回来的原文片段是不同的信任级别，别把两者混为一谈。
+11. **否定感知排行的两条已知缺口**（泛化 R3，见 `DEBUG_LOG.md` #48）：
+    ① 不带关系词的**裸否定**判不出（"不要排名"、"不用帮我排名" 仍会被当成要排行）；
+    ② `排行` / `排序` **本身不在** `RANK_WORDS` 里，所以"销量排行""按销量排序"
+       不会被识别成排行意图（这是**既有**行为，本轮没有往词表里加词——避免在
+       未验证的情况下引入新的误判）。两个缺口都只在"完全没提到其他指标"时才影响
+       到答案形状，公开题库与泛化套件均为绿。

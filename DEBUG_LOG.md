@@ -698,6 +698,126 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+## 缺陷 #43：Service 在 Planner 返回之后又做了一次规划【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 同一句问句，"这句话在问什么"有两套答案。`Planner.plan()` 解析一遍之后，`service._answer()` 又跑 `core.intent.classify()` 并用 `core.routing.apply_intent()` 改写 `intent`/`kind`。等于 **Planner 不是权威**，它只是"第一版草稿"。 |
+| **假设** | ① Service 里确实存在第二处 planning mutation point（意图复核 + 区间闸），且它能**增加** needs 维度（**成立**）；② 因为 Planner 返回的 Plan 会被改写，`intent` 与 `needs_data/needs_docs` 之间没有不变量约束（**成立**）；③ 该路径与"区间闸"共用同一段代码，顺序敏感、难以推理（**成立**）。 |
+| **验证实验** | 用探针直接打印 `planner.plan(q)` 的返回值与 `service` 最终 trace 里的 `plan`，逐条比对：`doc` 类问题在 Service 手里被改成别的形状；`牛肉poke 现在多少钱` 这类"现在"被当成时间窗的句子，Planner 判 doc、Service 又掰成 hybrid/price。旁证：在 `service.py` 上打桩统计 `core.intent.classify` 的调用次数——一次 turn 里被调用两次。 |
+| **根因** | 规划权威被切成两半。R2 收敛了事实与作答权威，但**规划**这一极仍是双头。 |
+| **修复** | `f73881a`。把 `_period_gate()`（区间闸）与 `_reconcile_intent()`（意图复核）整体收进 `Planner`，并在 `plan()` 末尾调用；`service._answer()` 只剩 `plan → trace → engine`，不再 import `intent`/`routing`。`core.routing.apply_intent()` **删除**，让第二权威没有落脚点。 |
+| **回归测试** | `test_service_does_not_reclassify_after_planner`（在 `core.intent.classify` 上装 spy，断言一次 turn 只被调用一次）/ `test_trace_exposes_single_canonical_plan`。**修复前红**（`8ebff2c`，**29 failed / 5 passed**，红输出见 `docs/_r3_red.txt`）；修复后绿。 |
+
+---
+
+## 缺陷 #44：Plan 的 intent 与 needs 可以自相矛盾【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | Plan 允许"intent=doc 却 needs_data=True"这类状态存在，而且**真的会发生**——因为 needs 是沿途各段代码各写各的（`_choose_kind` 写一处、Service 的复核再改一处），没有任何一处保证它与 intent 一致。 |
+| **假设** | ① `needs_data`/`needs_docs` 是被多处分别赋值的独立字段，不是从 intent 派生（**成立**）；② 因此下游（Answerer / LiveEngine）拿到的"要查数据吗"和"是什么意图"经常不是一回事（**成立**）。 |
+| **验证实验** | 对每种 intent 形状断言 `(intent, needs_data, needs_docs)`：`("7 月 S02 的营业额为什么比别的周低这么多？", ("hybrid", True, True))` 实测得到 `('doc', False, True)`（红输出原文见 `docs/_r3_red.txt`），期望与实测在 index 0 就分叉。 |
+| **根因** | 没有"唯一真相 + 派生"的结构，只有"多处赋值 + 事后希望它们一致"。 |
+| **修复** | `f73881a`。新增 `Plan.validate()`：按固定对照表（data→(T,F)、doc→(F,T)、hybrid→(T,T)、refusal/clarify→(F,F)）报告违规；新增 `_finalize()`：**needs 只由 intent 派生**，再调 `validate()`，有违规直接 `AssertionError`（不静默修——出现即代码 bug，测试与现场都能立刻看到）。 |
+| **回归测试** | `test_plan_invariants_hold_for_every_shape` / `test_plan_validate_reports_no_violation` / `test_plan_validate_flags_inconsistent_state`。**修复前红**（`8ebff2c`）；修复后绿。 |
+
+---
+
+## 缺陷 #45：真 hybrid 靠私有槽位 `slots["two_part"]` 偷改语义【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 真混合问题（既问数字又问原因）在数据模型里被表达成 `intent="data"` **加上**一个私有标记 `slots["two_part"]=True`，由 `Answerer` 看到这个暗号再去补文档那一半。于是"是什么意图"与"该怎么回答"被拆到两处，`intent` 字段本身在撒谎。 |
+| **假设** | ① `two_part` 只被 `answerer.py` 读取，是**隐藏的第二权威**（**成立**）；② 只要它还在，"hybrid 到底是不是 hybrid"就无法从 Plan 单独判定（**成立**）。 |
+| **验证实验** | 对 pure-hybrid why 句断言 `plan.intent == "hybrid"` —— 实测得到 `doc`；再 `git grep two_part` 确认 Answerer 依赖它分派。 |
+| **根因** | 用**私有槽位**表达了一个本该是**一等字段**的语义。 |
+| **修复** | `f73881a`。真 hybrid 直接置 `intent="hybrid"`；`_choose_kind` 不再写 `two_part`；`Answerer.answer()` 改为按 canonical `intent` 分派，`_merge_doc_side()` 由 `answer.answer_type != "data"` 触发（不再认 `two_part`），`_merge_data_side()` 删除。行为与旧实现等价——H01/T03 的 answer 与 data_evidence 逐字不变。 |
+| **回归测试** | `test_hybrid_is_really_hybrid` / `test_two_part_no_longer_drives_answerer`（后者直接 `inspect.getsource(answerer)` 断言源码里不再出现 `two_part`）。**修复前红**（`8ebff2c`）；修复后绿。 |
+
+---
+
+## 缺陷 #46：live 只能拿到自然语言，拿不到结构化 Plan【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | live 模式下 `_initial_messages()` 只把 `plan.standalone`（一句自然语言）塞进 system。**Planner 已经把门店/商品/时间窗/指标解析出来了，模型却完全不知道**，必须自己再解析一遍——于是"Planner 认对了、模型又猜错了"。 |
+| **假设** | ① system 消息里没有任何应用层的结构化解析结果（**成立**）；② 模型因此有动机（也会实际）自己重新猜门店/商品/时间（**成立**）。 |
+| **验证实验** | `test_live_receives_structured_plan_context`：构造一个"只看 system 消息"的假模型，断言 system 里能直接读到 `resolved_scope` 的 window/store/product/metric。修复前 system 里只有一句自然语言，红。 |
+| **根因** | 解析结果没有下传通道，只能靠自然语言"暗示"。 |
+| **修复** | `58ab02f`。新增 `Plan.as_model_context()`（intent / kind / standalone_question / resolved_scope{window, compare_window, as_of, store_id, product_id, metric} / needs / search_query / provenance），以 **JSON 追加进同一条 system 消息**（`PLAN_CONTEXT_HEADER`）——不新开第二条 system message，因为 OpenAI 兼容实现（含 DeepSeek）对多条 system 的处理不一致；R2 的 `SYSTEM_PROMPT` 安全规则原样保留。 |
+| **回归测试** | `test_live_receives_structured_plan_context` / `test_plan_context_is_structural_not_natural_language`。**修复前红**（`8ebff2c`）；修复后绿。 |
+
+---
+
+## 缺陷 #47：工具调用可以偏离 Planner 已解析的范围【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 模型给的工具参数**没有任何约束**：Plan 里已解析出 `store=S02, window=7/1..7/31`，模型却可以调 `query_metrics(7/1..7/31, 无门店)` 把范围悄悄放大到全店；或者把 S02 换成 S03、把时间窗换成别的月份。数据库算出的是**别的范围**的数字，而回答看起来一切正常——现场极难定位。另外，`by_store`（问"哪家最高"）如果被塞进 `store_id`，语义会从"哪家最高"变成"这一家是多少"。 |
+| **假设** | ① `run_tool(name, params)` 直接执行模型给的 `params`，没有与 Plan 对照（**成立**）；② 因此"范围扩大"与"范围换掉"两种漂移都不会被发现（**成立**）。 |
+| **验证实验** | 在 live 循环上装探针，分别让假模型给出 ①省略 store ②把 store 换成另一个 ③把时间窗改成整月 的参数：旧实现三种都照原样执行。再对纯工具层断言 `by_store`/`top_products` 被塞维度后的结果形状——确实是"被限定的那一个"，不是"最高的那一个"。 |
+| **根因** | 缺少"**执行已定稿 Plan**"这一层。Planner 做了权威，但工具边界不承认这个权威。 |
+| **修复** | `58ab02f`。新增 `kbqa/toolpolicy.py::PlanToolPolicy`：按**工具语义**声明每个维度的模式——`fill`（缺了按 Plan 补，冲突拒绝）/ `enforce`（只查冲突不主动补）/ `False`（该维度不约束，用于**维度展开**类工具）/ `strict`（即使 Plan 没解析出该维度也不许模型发明）。与 Plan 冲突的调用**拒绝执行**，回一条结构化 tool 消息（`error`/`field`/`expected`/`received`/`message`）并落 trace `tool_scope_rejected`；补齐落 `tool_scope_normalized`；receipt 记录的是**实际执行的 params**（`proposed` 只进 trace 供调试）。 |
+| **回归测试** | `test_missing_scope_is_filled_from_plan` / `test_live_autofills_scope_and_receipt_matches_plan` / `test_scope_conflict_is_rejected` / `test_live_rejects_conflicting_store` / `test_explicit_window_conflict_is_rejected(_in_live)` / `test_by_store_is_not_scoped_by_store` / `test_top_products_is_not_scoped_by_product` / `test_compare_periods_uses_canonical_windows` / `test_by_store_category_stays_open` / `test_first_sale_date_scope` / `test_first_sale_date_cannot_invent_product`。**修复前红**（`8ebff2c`）；修复后绿。 |
+| **边界说明** | 策略完全由 **Plan + 工具语义**决定，**没有任何针对具体题型的 if/else**，也没有写死任何门店/商品编号——`make swaptest` 换库后依旧成立。本层只约束**取数范围**，不改检索信任边界（`search_kb` 留 `False`，R4 才动）。 |
+
+---
+
+## 缺陷 #48：排行词不认否定（"不要按销量排名"被当成要排行）【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `RANK_WORDS` 是子串匹配，先撞上"排名/最高/最多"就认为用户在要排行。于是两种正常说法被判错：①**否定**——"不要按销量排名，只看 S02 7 月营业额"被当排行，连带把 `metric` 污染成销量（qty）；②**反差**——"顾客评价最多**不代表**营业额最高"整句被当排行，答成商品销量榜。 |
+| **假设** | ① 排行判定没有否定的概念（**成立**）；② 指标词识别用的是**整句**，所以被否掉的那半句里的"销量"会把 metric 带跑（**成立**）。 |
+| **验证实验** | 直接对生产实现跑合成句：修复前 `rank_negated("不要按销量排名，只看 S91 7 月营业额。")` 无此函数、`has_any(RANK_WORDS, …)` 为真 → Planner 判排行且 `metric` 取到被否掉的"销量"。修复后实测：`不要按销量排名，只看 S91 7 月营业额` → asks_ranking=False；`顾客评价最多不代表营业额最高` → False；而 `哪个门店营业额最高` / `7 月哪个商品销量最高` → True（真排行照旧）。 |
+| **根因** | 把"**提到**排行词"当成了"**要**排行"。 |
+| **修复** | `3b26cb6`。新增 `entities.asks_ranking()`（命中排行词**且**未被否定才算，排行意图的唯一入口）与 `rank_negated()`（四类否定/反差形状：`不要|别|不用`+`按|以|看成|解释`+`排名|最高…`；`A 最多 ≠ B 最高`；`需求最多并不是问谁最高`；`排名第一不代表…`）。`_choose_kind` 改用 `asks_ranking()`；新增 `focus_text_for_metric()`：确实出现否定排行时，把带排行词的小句摘掉再取指标。 |
+| **回归测试** | `test_negated_rank_is_not_ranking` / `test_contrast_is_not_rank` / `test_true_ranking_still_works`（反向护栏：by_store / top_products / category 三分派照旧）/ `test_regression_negated_rank_shape`。**修复前红**（`8ebff2c`）；修复后绿。 |
+| **仍未覆盖（已知限制）** | ① **不带关系词的裸否定**判不出：`rank_negated("不要排名")` / `rank_negated("不用帮我排名")` 均为 False（模式要求否定词后跟"按/以/看成/解释"这类关系词）。② `排行` / `排序` **本身不在** `RANK_WORDS` 里（表内是 最高/最多/最好/第一/top/排名/最畅销/卖得最好/最低/最少），所以"销量排行""按销量排序"不会被识别成排行**意图**——这一条是**既有**行为，不是本轮回归（本轮没有往表里加词，避免在未验证的情况下引入新误判）。两条都记在 README 与 LLM_SETUP 的已知限制里。 |
+
+---
+
+## 缺陷 #49：槽位没有来源标记，无法区分"没提到"与"没解析出来"【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | Plan 只有槽位的**值**，没有槽位的**来源**。"用户没提门店"（`store_id=None`，可能是在问排行，门店本就该开放）与"planner 没解析出门店"（同样是 `None`）在数据上完全一样。工具范围策略一旦想区分这两种情形，就只能靠猜。 |
+| **假设** | `store_source` / `product_source` 这类信息在解析过程中**产生过**但没有被保留到 Plan 上（**成立**——`find_store` 的调用点知道是显式命中还是别名/继承来的）。 |
+| **验证实验** | 断言 `plan.provenance["store"]` 在三种输入下分别是 `explicit`（写了 S91）/ `inherited`（追问继承）/ `none`（问排行，全程没提门店）——修复前 Plan 上根本没有 `provenance` 字段。 |
+| **根因** | 派生信息在产生处被丢弃，于是下游只能重新猜一遍，或退化成"看到值非空就当作已解析"。 |
+| **修复** | `f73881a`。`Plan` 新增 `provenance`；`_finalize()` 统一生成 `store`/`product`/`window`/`metric` 四维来源（`explicit`/`inherited`/`derived`/`default`/`none`），并入 `as_trace()` 与 `as_model_context()`。`PlanToolPolicy` 用它区分"可以拒绝漂移"与"该维度本就开放"（只有 `explicit`/`inherited`/`derived` 才算已解析）。 |
+| **回归测试** | `test_provenance_explicit` / `test_provenance_inherited_on_follow_up` / `test_open_dimension_is_none_provenance`。**修复前红**（`8ebff2c`）；修复后绿。 |
+
+---
+
+## 缺陷 #50：编号紧跟中文解析不出 + "S02 6 月"的月份被吃掉【泛化 R3 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 两个**与题库无关**的解析边界缺陷，是写 R3 探针时额外挖出来的（不在候选清单里）：<br>① `\b` 边界对中文失效 → `S05当月净营业额` 解析不出门店；<br>② `S02 6 月净营业额` 的"6 月"整个丢失，时间窗落到默认全区间。 |
+| **假设** | ① Python 的 `\b` 依赖 `\w`，而中文也是 `\w`，所以"编号紧跟中文"时左右都不是边界（**成立**）；② `parse_time` 先 `replace(" ", "")` 再匹配月份，`"S02 6 月"` 被粘成 `"S026月"`，月份正则匹配到 `"26月"` 后因非法而整体丢弃（**成立**）。 |
+| **验证实验** | 修复后实测：`STORE_CODE.findall("s05当月净营业额") → ['05']`；`separate_codes("S02 6 月") → 'S02\x00 6 月'`；`parse_time("S02 6 月净营业额", date(2026,9,1)).window → ('2026-06-01','2026-06-30')`。修复前分别是 `[]` 与整个默认区间。 |
+| **根因** | 两处都是"用只对 ASCII 成立的边界/顺序假设去处理中文"。 |
+| **修复** | `3b26cb6`。① `entities.STORE_CODE` / `PRODUCT_CODE` 改为 `(?<![a-z0-9])s(\d{1,2})(?![0-9])`（左边不是字母数字、右边不是数字），`core.guard.py` 与 `core.aliases.py` 两处同款统一；② 新增 `timeparse.separate_codes()`，解析前在"编号 + 后续数字"之间插分隔符，再照旧去空格。 |
+| **回归测试** | `test_entity_code_adjacent_to_cjk` / `test_month_after_entity_code`。**修复前红**（`8ebff2c`）；修复后绿。 |
+
+---
+
+## 缺陷 #51：红测试跑出来 0 个 plan —— 是 `guard` 崩了，不是规划崩了【泛化 R3 自查修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | R3 第一次跑全量红测试时，`test_service_does_not_reclassify_after_planner` 与 `test_trace_exposes_single_canonical_plan` 不是"断言失败"，而是 trace 里**一个 `plan`/`intent` step 都没有**——像是规划层整个没执行。 |
+| **假设** | 表面像"Service 把规划跳过了"，但两条用例的失败形态完全一致、且连 `plan` step 都缺，更像**流水线在更早的地方抛异常**（**成立**）。 |
+| **验证实验** | 直接调 `service._answer()` 看异常栈：`kbqa/core/guard.py::_unknown_entity` 里用了 `normalise` 但模块内没有 import → `NameError`，安全闸一进就炸，于是 Planner 根本没被调用。 |
+| **根因** | 我在同一轮里把 `guard.py` 的编号正则换成 `STORE_CODE/PRODUCT_CODE` 时，顺手引用了 `normalise` 却漏了 import。 |
+| **修复** | `3b26cb6`。在 `_unknown_entity()` 内 `from .tokenizer import normalise`。修好后 34 条 R3 测试全绿。 |
+| **回归测试** | `test_service_does_not_reclassify_after_planner` / `test_trace_exposes_single_canonical_plan`（由红转绿）。 |
+| **方法论** | 又是"**两项表现自相矛盾时先怀疑观测手段**"的同类（对比 #13）：把 trace 当成"被测对象没跑"的证据之前，先确认流水线没有更早的异常——`0 个 step` 与 `step 内容不对` 是两种完全不同的故障。 |
+
+---
+
 ## 附：现场调试演练计时（P5 §3，模拟评委 40 分钟环节）
 
 | 演练 | 题目 | 定位耗时 | 修复+回归测试 | 方法论回放 |
