@@ -173,10 +173,11 @@ def test_refusal_does_not_overwrite_last_successful_state(service):
 
 
 def test_clarify_does_not_overwrite_last_successful_state(service):
+    store = service.tools.stores()[0]["store_id"]
     product = service.tools.products()[0]["product_id"]
-    service.chat("r5-clarify", "%s 7 月销量" % product)
+    service.chat("r5-clarify", "%s %s 7 月销量" % (store, product))
     before = _state_dict(_state(service, "r5-clarify"))
-    clarification = service.chat("r5-clarify", "8 号那天呢？")
+    clarification = service.chat("r5-clarify", "那它呢？")
     after = _state_dict(_state(service, "r5-clarify"))
 
     assert clarification["answer_type"] == "clarify"

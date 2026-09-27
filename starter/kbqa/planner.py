@@ -8,6 +8,7 @@ from datetime import date
 from typing import Callable, Optional
 
 from . import entities as E
+from .conversation import ConversationState
 from .followup import FollowUps
 from .timeparse import TimeSpec, parse_time
 
@@ -62,6 +63,7 @@ class Plan:
     #: 每个槽位是怎么来的：explicit / inherited / default / derived / none。
     #: 工具范围策略靠它区分"用户没提门店"(none) 与"planner 没解析出门店"。
     provenance: dict = field(default_factory=dict)
+    continuation: bool = False
 
     def as_trace(self) -> dict:
         return {
@@ -80,6 +82,7 @@ class Plan:
             "needs_data": self.needs_data,
             "needs_docs": self.needs_docs,
             "provenance": self.provenance,
+            "continuation": self.continuation,
             "refusal": self.refusal,
             "notes": self.notes,
         }
@@ -130,6 +133,7 @@ class Plan:
             "needs": {"data": self.needs_data, "documents": self.needs_docs},
             "search_query": self.search_query,
             "provenance": dict(self.provenance),
+            "continuation": self.continuation,
         }
 
 
@@ -148,20 +152,33 @@ class Planner:
         #: 给一句话“探个底”：返回（词表覆盖率，检索最高分）。越界判断要靠它。
         self.scout = scout or (lambda text: (1.0, 100.0))
 
-    def plan(self, question: str, history: Optional[list[dict]] = None) -> Plan:
-        standalone, inherited = self.followups.resolve(question, history or [])
-        plan = Plan(question=question, standalone=standalone, search_query=standalone)
-        history = history or []
-        if not history and E.looks_like_follow_up(question) and len(question.strip()) <= 12:
+    def plan(
+        self, question: str,
+        state: Optional[ConversationState | list[dict]] = None,
+    ) -> Plan:
+        resolution = self.followups.resolve(question, state)
+        inherited = resolution.inherited
+        plan = Plan(
+            question=question,
+            standalone=question,
+            search_query=question,
+            continuation=resolution.continuation,
+        )
+        if not resolution.continuation and E.looks_like_follow_up(question) and len(question.strip()) <= 12:
             plan.intent, plan.kind = "clarify", "need_context"
             plan.refusal = "这句像是追问，但这个会话里没有上文。请把问题补完整，例如“7 月的净营业额是多少”。"
             return plan
-        if standalone != question:
-            plan.notes.append("这是一句追问，已按上一轮补全为：%s" % standalone)
+        if resolution.continuation:
+            plan.notes.append("这是一句追问，按 ConversationState 补全缺失槽位。")
+            plan.slots["conversation_mode"] = "follow_up"
+            plan.slots["follow_up_operator"] = resolution.operator
+            plan.slots["topic_query"] = resolution.topic_query
+        else:
+            plan.slots["conversation_mode"] = "new_topic"
 
-        # 越界判断放在追问还原之后：“那 7 月呢”要先补成完整问题才判得准。
-        head = E.head_clause(standalone)
-        reason = E.out_of_scope(standalone, *self.scout(head))
+        # 越界判断只看当前 utterance；state 只补语义槽位，不生成新的自然语言。
+        head = E.head_clause(question)
+        reason = E.out_of_scope(question, *self.scout(head))
         if reason:
             plan.intent, plan.kind = "refusal", "out_of_scope"
             plan.notes.append("越界判断：%s" % reason)
@@ -171,12 +188,19 @@ class Planner:
             )
             return plan
 
-        spec = parse_time(standalone, self.today)
+        spec = parse_time(question, self.today)
         self.followups.inherit_time(plan, spec, question, inherited)
-        plan.as_of = spec.as_of or self.today
+        if resolution.operator == "current":
+            plan.as_of = self.today
+            inherited["historical"] = False
+        else:
+            plan.as_of = spec.as_of or (
+                date.fromisoformat(str(inherited["as_of"])[:10])
+                if resolution.continuation and inherited.get("as_of") else self.today
+            )
         plan.year = spec.year
-        store_id, unknown_store = self.catalog.find_store(standalone)
-        product_id, unknown_product = self.catalog.find_product(standalone)
+        store_id, unknown_store = self.catalog.find_store(question)
+        product_id, unknown_product = self.catalog.find_product(question)
         plan.store_id = store_id or (inherited.get("store_id") if not unknown_store else None)
         plan.product_id = product_id or (inherited.get("product_id") if not unknown_product else None)
         #: 记录槽位来源，供 _finalize 生成 provenance。**不重新解析**，
@@ -200,6 +224,11 @@ class Planner:
             plan.refusal = "商品表里没有 %s 这个商品编号。" % unknown_product
             return plan
 
+        if resolution.ambiguous:
+            plan.intent, plan.kind = "clarify", "ambiguous_reference"
+            plan.refusal = "这句里的指代不够明确；请说明具体门店或商品。"
+            return plan
+
         self._fill_measure(plan, spec, inherited)
         if plan.slots.get("needs_month"):
             plan.intent, plan.kind = "clarify", "need_month"
@@ -209,7 +238,7 @@ class Planner:
                 self.data_period["end"],
             )
             return plan
-        self._choose_kind(plan, spec)
+        self._choose_kind(plan, spec, inherited)
         self._check_period(plan, spec)
         self._build_search_query(plan, spec)
         # 区间闸与意图复核**都收进 Planner**（泛化 R3）：返回之后，Plan 的规划字段
@@ -220,11 +249,9 @@ class Planner:
         if not gated:
             self._reconcile_intent(plan)
         self._finalize(plan, spec, inherited)
-        recent = [
-            window
-            for window in (inherited.get("recent_windows") or []) + [plan.window]
-            if window
-        ]
+        recent = list(inherited.get("recent_windows") or [])
+        if plan.window and plan.provenance.get("window") != "default":
+            recent.append(plan.window)
         deduped: list = []
         for window in recent:
             if window not in deduped:
@@ -260,18 +287,27 @@ class Planner:
         )
         plan.slots["metric_explicit"] = bool(metric)
         plan.slots["time_explicit"] = bool(spec.explicit and spec.windows)
-        plan.slots["time_scoped"] = bool(spec.explicit or spec.relative_now)
+        plan.slots["time_scoped"] = bool(
+            spec.explicit or spec.relative_now or inherited.get("window")
+        )
         # 问旧版有两种问法：给了具体日期的，按那天生效的版本选（as-of）；
         # 只说“以前/旧口径”没给日期的，才整体解除“已废止”过滤。
         dated = bool(spec.windows) and spec.as_of is not None and spec.as_of < self.today
-        plan.slots["historical"] = E.wants_historical(text) and not dated
+        plan.slots["historical"] = bool(
+            (E.wants_historical(text) and not dated)
+            or (inherited.get("historical") and plan.slots.get("conversation_mode") == "follow_up")
+        )
+        if plan.slots.get("follow_up_operator") == "current":
+            plan.slots["historical"] = False
+        if plan.slots.get("follow_up_operator") == "historical":
+            plan.slots["historical"] = True
         plan.slots["as_of_dated"] = dated
         if plan.slots["historical"]:
             plan.notes.append("问的是过去那一版的规定，已把已废止的文档放回检索范围。")
         elif dated and E.wants_historical(text):
             plan.notes.append("问的是 %s 当时的规定，按 effective_from 选当时生效的版本。" % spec.as_of)
 
-    def _choose_kind(self, plan: Plan, spec: TimeSpec) -> None:
+    def _choose_kind(self, plan: Plan, spec: TimeSpec, inherited: dict) -> None:
         """先判断这是“问数字”还是“问规定”，再细分到具体的取数方式。"""
         text = plan.standalone
         windows = list(spec.windows)
@@ -296,18 +332,25 @@ class Planner:
         abnormal = E.is_abnormal(text)
         has_subject = bool(plan.store_id or plan.product_id or plan.slots.get("time_explicit"))
         # 只有问句里真的点到了数据库能算的东西，才允许走取数路线。
+        operator = plan.slots.get("follow_up_operator")
         may_query = bool(
             explicit_metric
             or asks_payment
             or E.has_any(text, E.SALES_RANK_WORDS)
             or (asks_business and plan.slots.get("time_scoped"))
+            or (plan.continuation and (
+                plan.store_id or plan.product_id or inherited.get("window")
+                or operator in ("actual", "dimension_shift", "reason", "comparison")
+            ))
         )
         compares = len(windows) > 1 and E.has_any(text, E.TREND_WORDS)
         if asks_target:
             plan.kind, plan.intent = "target", "hybrid"
         elif asks_price and plan.product_id:
             plan.kind, plan.intent = "price", "hybrid"
-        elif (asks_why or abnormal) and has_subject and (explicit_metric or abnormal):
+        elif (asks_why or abnormal) and has_subject and (
+            explicit_metric or abnormal or operator == "reason"
+        ):
             # “怎么这么低”“一单都没有”也是在问原因，不必出现“为什么”三个字。
             plan.kind, plan.intent = "anomaly", "hybrid"
         elif compares:
@@ -437,6 +480,20 @@ class Planner:
             # 追问但没有上文：真的没法答，意图复核不该把它掰成能回答的问题。
             return
 
+        if (
+            plan.continuation
+            and plan.intent in ("data", "hybrid")
+            and not any(word in plan.standalone for word in ("规定", "政策", "流程", "怎么", "如何", "是什么"))
+        ):
+            # A short continuation such as “那 7 月呢？” is intentionally not
+            # self-contained.  The semantic planner has already resolved it from
+            # the canonical state; running the standalone classifier here would
+            # see only a pronoun and incorrectly turn a data follow-up into doc/doc.
+            plan.notes.append("意图复核：语义续问沿用 planner 的数据结论")
+            plan.slots["intent_confidence"] = 1.0
+            plan.slots["intent_hints"] = ["conversation_state"]
+            return
+
         planner_intent, planner_kind = plan.intent, plan.kind
         hinted = intent_mod.find_metric(E.focus_text_for_metric(plan.standalone))
         intent = intent_mod.classify(plan.standalone, metric_word=hinted)
@@ -493,6 +550,7 @@ class Planner:
             "window": (
                 "derived" if spec.first_month
                 else "explicit" if spec.explicit
+                else "inherited" if inherited.get("window")
                 else "default"
             ),
             "metric": (
@@ -513,6 +571,8 @@ class Planner:
             text = text.replace(word, "")
         plan.slots["clean_question"] = text.strip() or plan.standalone
         parts = [plan.slots["clean_question"]]
+        if plan.continuation and plan.slots.get("topic_query"):
+            parts.append(plan.slots["topic_query"])
         if plan.store_id:
             parts.append("%s %s" % (plan.store_id, self.catalog.store_name(plan.store_id)))
         if plan.product_id:
