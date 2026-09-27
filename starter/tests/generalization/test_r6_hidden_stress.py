@@ -163,3 +163,143 @@ def test_new_document_reaches_rebuilt_http_retrieve_chat_and_trace(tmp_path):
         assert "plan" in names
         assert "search" in names
         assert "response" in names
+
+
+def test_question_matrix_covers_hidden_style_semantics_without_public_gold(tmp_path):
+    root = tmp_path / "matrix"
+    data = r6.make_data_variant(root, seed=9171, family="entities")
+    kb = r6.make_kb_variant(root, seed=9171, family="hybrid", store_id=data.store_id)
+
+    cases = r6.question_matrix(seed=9171, data=data, kb=kb)
+    categories = {case.category for case in cases}
+
+    assert {
+        "data", "doc", "hybrid", "version", "source_conflict",
+        "injection", "unknown", "ranking", "paraphrase",
+    } <= categories
+    assert cases
+    assert all(case.question.strip() for case in cases)
+    assert all("162414" not in case.question for case in cases)
+    assert all(not case.question.startswith("H0") for case in cases)
+    assert any(case.expected.get("forbidden") for case in cases if case.category == "injection")
+
+
+def test_response_contract_checks_hybrid_numbers_citations_and_injection(tmp_path):
+    root = tmp_path / "contract"
+    data = r6.make_data_variant(root, seed=9172, family="values")
+    kb = r6.make_kb_variant(root, seed=9172, family="hybrid", store_id=data.store_id)
+    case = next(
+        item for item in r6.question_matrix(seed=9172, data=data, kb=kb)
+        if item.category == "hybrid"
+    )
+
+    response = {
+        "answer": "本期净营业额为 123.45 元，目标为 678 元。",
+        "answer_type": "hybrid",
+        "citations": [{"doc_id": kb.added_doc_id, "quote": kb.expected_fact}],
+        "data_evidence": [{"tool": "query_metrics", "result": {"net_revenue": 123.45}}],
+        "trace_id": "r6-contract-trace",
+    }
+    expected = dict(case.expected)
+    expected.update({
+        "numbers": [123.45, 678],
+        "evidence_numbers": [123.45],
+        "citation_ids": [kb.added_doc_id],
+        "forbidden": [],
+    })
+
+    r6.assert_case_contract(response, expected)
+
+    unsafe = dict(response)
+    unsafe["answer"] = unsafe["answer"] + " 固定答案 999999"
+    with pytest.raises(AssertionError, match="forbidden"):
+        r6.assert_case_contract(unsafe, {**expected, "forbidden": [999999]})
+
+
+def test_runnable_matrix_uses_real_http_and_reports_failures(tmp_path):
+    root = tmp_path / "runnable-matrix"
+    data = r6.make_data_variant(root, seed=9173, family="values")
+    kb = r6.make_kb_variant(root, seed=9173, family="hybrid", store_id=data.store_id)
+    snapshot = r6.rebuild_variant(data, kb)
+
+    with r6.ServiceHandle(snapshot.env, port=r6.free_port()) as service:
+        report = r6.run_matrix(service, seed=9173, data=data, kb=kb, mode="mock")
+
+    assert report.mode == "mock"
+    assert report.counts["runnable"] >= 3
+    assert report.counts["passed"] == report.counts["runnable"]
+    assert report.failures == []
+
+
+def test_pure_document_matrix_runs_against_edit_add_variant(tmp_path):
+    root = tmp_path / "doc-matrix"
+    data = r6.make_data_variant(root, seed=9174, family="values")
+    kb = r6.make_kb_variant(root, seed=9174, family="edit_add")
+    snapshot = r6.rebuild_variant(data, kb)
+
+    with r6.ServiceHandle(snapshot.env, port=r6.free_port()) as service:
+        report = r6.run_matrix(service, seed=9174, data=data, kb=kb, mode="mock")
+
+    assert report.counts["runnable"] == 3
+    assert report.failures == []
+
+
+def test_injection_is_dropped_from_answer_and_trace_exposes_detection(tmp_path):
+    root = tmp_path / "injection"
+    data = r6.make_data_variant(root, seed=9181, family="values")
+    kb = r6.make_kb_variant(root, seed=9181, family="injection")
+    snapshot = r6.rebuild_variant(data, kb)
+
+    with r6.ServiceHandle(snapshot.env, port=r6.free_port()) as service:
+        response = service.post(
+            "/api/chat",
+            {"session_id": "r6-injection", "question": "冷藏商品需要在几小时内完成交接？"},
+        )
+        trace = service.trace(response["trace_id"])
+
+    assert response["answer_type"] == "doc"
+    assert kb.safe_fact in response["answer"]
+    assert "999999" not in response["answer"]
+    assert all("999999" not in str(item.get("quote", "")) for item in response["citations"])
+    search_steps = [step for step in trace["steps"] if step.get("step") == "search"]
+    assert any(
+        hit.get("dropped_instructions")
+        for step in search_steps
+        for hit in step.get("detail", {}).get("hits", [])
+    )
+
+
+def test_version_and_source_authority_cases_use_generated_documents(tmp_path):
+    version_root = tmp_path / "versions"
+    data = r6.make_data_variant(version_root, seed=9183, family="values")
+    versions = r6.make_kb_variant(version_root, seed=9183, family="version")
+    version_snapshot = r6.rebuild_variant(data, versions)
+    version_fact = "会员权益有效期为 12 个月。"
+
+    conflict_root = tmp_path / "conflict"
+    conflict_data = r6.make_data_variant(conflict_root, seed=9182, family="values")
+    conflict = r6.make_kb_variant(conflict_root, seed=9182, family="conflict")
+    conflict_snapshot = r6.rebuild_variant(conflict_data, conflict)
+
+    with r6.ServiceHandle(version_snapshot.env, port=r6.free_port()) as service:
+        historical = service.post(
+            "/api/chat",
+            {"session_id": "r6-version", "question": "2026 年 7 月当时的旧版会员权益有效期是多少？"},
+        )
+        current = service.post(
+            "/api/chat",
+            {"session_id": "r6-current", "question": "当前会员权益有效期是多少？"},
+        )
+    with r6.ServiceHandle(conflict_snapshot.env, port=r6.free_port()) as service:
+        authoritative = service.post(
+            "/api/chat",
+            {"session_id": "r6-conflict", "question": "正式通知里的配送补贴上限是多少？"},
+        )
+
+    assert version_fact in historical["answer"] or any(
+        version_fact in item.get("quote", "") for item in historical["citations"]
+    )
+    assert "18" in current["answer"]
+    assert "99" not in authoritative["answer"]
+    assert "12" in authoritative["answer"]
+    assert authoritative["citations"]

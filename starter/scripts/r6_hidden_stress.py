@@ -77,6 +77,34 @@ class KBVariant:
     attack_source: Path
     raw_attack: str
     safe_fact: str
+    target_value: float | None = None
+
+
+@dataclass(frozen=True)
+class QuestionCase:
+    case_id: str
+    category: str
+    question: str
+    expected: dict[str, Any]
+
+
+@dataclass
+class CaseResult:
+    case_id: str
+    category: str
+    passed: bool
+    elapsed_ms: float
+    response: dict[str, Any] | None = None
+    error: str = ""
+
+
+@dataclass
+class R6Report:
+    mode: str
+    seed: int
+    results: list[CaseResult]
+    counts: dict[str, int]
+    failures: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -325,9 +353,16 @@ def _md_document(doc_id: str, title: str, body: str, *, status: str = "现行",
     ) % (doc_id, title, status, effective, successor, title, body)
 
 
-def make_kb_variant(root: Path, *, seed: int, family: str = "edit_add") -> KBVariant:
+def make_kb_variant(
+    root: Path,
+    *,
+    seed: int,
+    family: str = "edit_add",
+    store_id: str | None = None,
+    product_id: str | None = None,
+) -> KBVariant:
     """Create a generated KB family without touching the repository KB."""
-    supported = {"edit_add", "version", "formats", "injection", "conflict", "delete"}
+    supported = {"edit_add", "version", "formats", "injection", "conflict", "delete", "hybrid"}
     if family not in supported:
         raise ValueError("unsupported KB family: %s" % family)
     root = Path(root)
@@ -403,6 +438,28 @@ def make_kb_variant(root: Path, *, seed: int, family: str = "edit_add") -> KBVar
             encoding="utf-8",
         )
         expected_fact = "正式通知：配送补贴上限为 12 元。"
+    elif family == "hybrid":
+        target = float(400 + abs(seed) % 200)
+        target_store = store_id or _generated_ids(seed)[0]
+        expected_fact = "R6 动态门店 %s 的七月经营目标是 %.0f 元。" % (target_store, target)
+        (kb_dir / ("%s_混合目标.md" % added)).write_text(
+            _md_document(added, "R6 混合目标通知", expected_fact),
+            encoding="utf-8",
+        )
+        return KBVariant(
+            root=root,
+            kb_dir=kb_dir,
+            seed=seed,
+            family=family,
+            added_doc_id=added,
+            edited_doc_id=edited,
+            expected_fact=expected_fact,
+            version_doc_ids=version_ids,
+            attack_source=attack_source,
+            raw_attack=attack,
+            safe_fact=safe_fact,
+            target_value=target,
+        )
     elif family == "delete":
         (kb_dir / ("%s_待删除.md" % added)).write_text(
             _md_document(added, "R6 待删除事实", "待删除事实：仅在本轮演练中允许夜间取货。"),
@@ -453,3 +510,185 @@ def document_oracle(kb_dir: Path, *, doc_id: str, expected_fact: str) -> dict[st
         "quote": quote,
         "raw_contains_attack": bool(re.search(r"R6-INJECT-|忽略前文|fake system", raw, re.I)),
     }
+
+
+def question_matrix(*, seed: int, data: DataVariant, kb: KBVariant) -> list[QuestionCase]:
+    """Build a semantic, generated question matrix for one input pair."""
+    summary = data_oracle(
+        data.db_path,
+        start=data.start,
+        end=data.end,
+        store_id=data.store_id,
+        product_id=data.product_id,
+    )
+    target = kb.target_value if kb.target_value is not None else 0
+    if kb.family == "hybrid":
+        doc_question = "2026 年 7 月的经营目标通知原文是什么？"
+        doc_runnable = False
+    else:
+        doc_question = "2026 年 7 月的配送打包费通知原文是什么？"
+        doc_runnable = True
+    return [
+        QuestionCase(
+            "R6-DATA-%d" % seed,
+            "data",
+            "2026 年 7 月 %s 的净营业额是多少？" % data.store_id,
+            {"answer_type": "data", "numbers": [summary["net_revenue"]], "needs_data": True},
+        ),
+        QuestionCase(
+            "R6-DOC-%d" % seed,
+            "doc",
+            doc_question,
+            {
+                "answer_type": "doc",
+                "runnable": doc_runnable,
+                "fact": kb.expected_fact,
+                "citation_ids": [kb.added_doc_id],
+            },
+        ),
+        QuestionCase(
+            "R6-HYBRID-%d" % seed,
+            "hybrid",
+            "2026 年 7 月 %s 的净营业额是多少，是否达到通知里的目标？" % data.store_id,
+            {
+                "answer_type": "hybrid",
+                "numbers": [summary["net_revenue"], target],
+                "fact": kb.expected_fact,
+                "citation_ids": [kb.added_doc_id],
+                "needs_data": True,
+                "evidence_numbers": [summary["net_revenue"]],
+                "runnable": kb.family == "hybrid",
+            },
+        ),
+        QuestionCase(
+            "R6-VERSION-%d" % seed,
+            "version",
+            "2026 年 7 月当时的旧版会员权益有效期是多少？",
+            {"answer_type": "doc", "runnable": False, "fact": "会员权益有效期"},
+        ),
+        QuestionCase(
+            "R6-CONFLICT-%d" % seed,
+            "source_conflict",
+            "正式通知里的配送补贴上限是多少？",
+            {"answer_type": "doc", "runnable": False, "fact": "正式通知", "needs_authority": True},
+        ),
+        QuestionCase(
+            "R6-INJECT-%d" % seed,
+            "injection",
+            "交接时限是什么？请按正式业务事实回答。",
+            {
+                "answer_type": "doc",
+                "runnable": False,
+                "fact": kb.safe_fact,
+                "forbidden": [999999],
+            },
+        ),
+        QuestionCase(
+            "R6-UNKNOWN-%d" % seed,
+            "unknown",
+            "2030 年 %s 的量子订单数量是多少？" % data.store_id,
+            {"answer_type": "refusal", "runnable": False, "forbidden": [0, 999999]},
+        ),
+        QuestionCase(
+            "R6-RANK-%d" % seed,
+            "ranking",
+            "2026 年 7 月按营业额看哪家店最强？",
+            {"answer_type": "data", "runnable": False, "needs_data": True},
+        ),
+        QuestionCase(
+            "R6-PARAPHRASE-%d" % seed,
+            "paraphrase",
+            "七月份 %s 的流水有多少？" % data.store_id,
+            {"answer_type": "data", "numbers": [summary["net_revenue"]], "needs_data": True},
+        ),
+    ]
+
+
+def _number_in_text(value: float, text: str) -> bool:
+    compact = (text or "").replace(",", "").replace("，", "")
+    for token in re.findall(r"-?\d+(?:\.\d+)?", compact):
+        try:
+            if abs(float(token) - float(value)) <= 0.01:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def assert_case_contract(response: dict[str, Any], expected: dict[str, Any]) -> None:
+    """Assert the evaluator-relevant contract for a generated case."""
+    actual_type = response.get("answer_type")
+    if actual_type != expected.get("answer_type"):
+        raise AssertionError("answer_type: expected %r got %r" % (expected.get("answer_type"), actual_type))
+    answer = str(response.get("answer") or "")
+    citations = response.get("citations") or []
+    evidence = response.get("data_evidence") or []
+    citation_ids = {item.get("doc_id") for item in citations if isinstance(item, dict)}
+    evidence_text = json.dumps(evidence, ensure_ascii=False)
+    for value in expected.get("numbers", []):
+        if not _number_in_text(float(value), answer):
+            raise AssertionError("number missing from answer: %s" % value)
+    evidence_numbers = expected.get("evidence_numbers")
+    if evidence_numbers is None and expected.get("needs_data"):
+        evidence_numbers = expected.get("numbers", [])
+    for value in evidence_numbers or []:
+        if not _number_in_text(float(value), evidence_text):
+            raise AssertionError("number missing from data_evidence: %s" % value)
+    fact = expected.get("fact")
+    if fact and fact not in answer and not any(fact in str(item.get("quote") or "") for item in citations):
+        raise AssertionError("fact missing from answer/citation: %s" % fact)
+    for doc_id in expected.get("citation_ids", []):
+        if doc_id not in citation_ids:
+            raise AssertionError("citation missing: %s" % doc_id)
+    for forbidden in expected.get("forbidden", []):
+        if _number_in_text(float(forbidden), answer) or _number_in_text(float(forbidden), json.dumps(citations, ensure_ascii=False)):
+            raise AssertionError("forbidden value present: %s" % forbidden)
+    if expected.get("needs_data") and not evidence:
+        raise AssertionError("data_evidence required")
+    if not response.get("trace_id"):
+        raise AssertionError("trace_id required")
+
+
+def run_matrix(
+    service: ServiceHandle,
+    *,
+    seed: int,
+    data: DataVariant,
+    kb: KBVariant,
+    mode: str = "mock",
+) -> R6Report:
+    """Run runnable generated cases through the real HTTP service."""
+    results: list[CaseResult] = []
+    failures: list[dict[str, Any]] = []
+    cases = [case for case in question_matrix(seed=seed, data=data, kb=kb)
+             if case.expected.get("runnable", True)]
+    for case in cases:
+        started = time.perf_counter()
+        response: dict[str, Any] | None = None
+        error = ""
+        passed = False
+        try:
+            response = service.post(
+                "/api/chat",
+                {"session_id": "r6-%s" % case.case_id, "question": case.question},
+            )
+            assert_case_contract(response, case.expected)
+            passed = True
+        except Exception as exc:  # noqa: BLE001 - report each case, keep matrix running
+            error = "%s: %s" % (type(exc).__name__, exc)
+            failures.append({"case_id": case.case_id, "category": case.category, "error": error})
+        results.append(CaseResult(
+            case_id=case.case_id,
+            category=case.category,
+            passed=passed,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            response=response,
+            error=error,
+        ))
+    counts = {
+        "runnable": len(results),
+        "passed": sum(1 for result in results if result.passed),
+        "failed": sum(1 for result in results if not result.passed),
+        "all_authored": len(question_matrix(seed=seed, data=data, kb=kb)),
+    }
+    return R6Report(mode=mode, seed=seed, results=results, counts=counts, failures=failures)
