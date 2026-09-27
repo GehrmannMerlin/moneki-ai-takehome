@@ -73,6 +73,57 @@ def test_citation_chunk_selection_uses_answer_claim_when_query_is_broad():
     assert "24 小时" in citations[0]["quote"]
 
 
+def test_citation_quote_selection_prefers_claim_numbers_inside_chunk():
+    from kbqa.citations import build_citations
+    from kbqa.ledger import FactLedger, KNOWLEDGE_SOURCE
+    from kbqa.trace import Trace
+
+    class Facts:
+        index = SimpleNamespace(docs_meta={"KB-R6": {}})
+
+        @staticmethod
+        def cite(doc_id, quote):
+            return {"doc_id": doc_id, "quote": quote}
+
+    ledger = FactLedger()
+    ledger.add(
+        "search_kb",
+        {"query": "外卖订单退款时限"},
+        {
+            "results": [{
+                "doc_id": "KB-R6",
+                "chunk_id": "KB-R6#1",
+                "score": 10,
+                "source_text": (
+                    "退款政策说明外卖订单申请受理窗口。"
+                    "单笔超过 200 元需店长审批。"
+                    "外卖订单在送达后 24 小时内提出，超过 24 小时不再受理。"
+                ),
+                "text": (
+                    "退款政策说明外卖订单申请受理窗口。"
+                    "单笔超过 200 元需店长审批。"
+                    "外卖订单在送达后 24 小时内提出，超过 24 小时不再受理。"
+                ),
+            }]
+        },
+        source=KNOWLEDGE_SOURCE,
+    )
+    plan = SimpleNamespace(search_query="外卖订单退款时限", standalone="", question="外卖订单多久能退款？")
+    trace = Trace("r6-citation-number", plan.question)
+
+    citations = build_citations(
+        plan,
+        ["KB-R6"],
+        ledger,
+        Facts(),
+        trace,
+        claim_text="外卖订单在送达后 24 小时内提出。",
+    )
+
+    assert citations
+    assert "24 小时" in citations[0]["quote"]
+
+
 def test_generated_data_variant_has_seeded_nonpublic_entities_and_direct_oracle(tmp_path):
     variant = r6.make_data_variant(tmp_path / "variant", seed=9141, family="values")
 

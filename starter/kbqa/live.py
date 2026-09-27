@@ -353,6 +353,36 @@ class LiveEngine:
         })
 
         if bad:
+            # The first citation pass has the whole answer as a ranking hint.
+            # If that answer contains several numbers, a long retrieved chunk
+            # can select a nearby but different numeric sentence (for example
+            # an approval threshold instead of the claimed time window).  Use
+            # only the currently unsupported numbers for a bounded second
+            # citation selection before asking the model to repair prose.  The
+            # candidate set is unchanged: this remains receipt-bound and
+            # cannot discover a new document or fact.
+            focused_citations = build_citations(
+                plan,
+                doc_ids,
+                ledger,
+                self.answerer.facts,
+                trace,
+                claim_text=" ".join(_fmt(value) for value in bad[:5]),
+            )
+            focused_allowed = self._allowed_numbers(plan, ledger, focused_citations)
+            focused_bad = _unsupported_numbers(text, focused_allowed)
+            trace.step("citation_reselection", {
+                "before": bad[:5],
+                "after": focused_bad[:5],
+                "citations": [item.get("doc_id") for item in focused_citations],
+            })
+            if len(focused_bad) < len(bad):
+                citations, allowed, bad = focused_citations, focused_allowed, focused_bad
+                if not bad:
+                    trace.step("citation_reselection", {"result": "valid"})
+                    return self._finalised_answer(
+                        text, plan, ledger, citations, trace
+                    )
             repaired = self._repair(plan, messages, ledger, bad, trace, deadline)
             if repaired is None:
                 return self._refusal(bad, ledger)
@@ -373,6 +403,17 @@ class LiveEngine:
         if not text:
             raise LLMError("empty_content", "模型最终回答为空")
 
+        return self._finalised_answer(text, plan, ledger, citations, trace)
+
+    def _finalised_answer(
+        self,
+        text: str,
+        plan: Plan,
+        ledger: FactLedger,
+        citations: list[dict],
+        trace,
+    ) -> Answer:
+        """Build the public answer after final validation has succeeded."""
         evidence = select_evidence(ledger, extract_numbers(text), plan)
         trace.step("evidence_selected", {
             "receipts": [item.get("receipt_id") for item in evidence],
