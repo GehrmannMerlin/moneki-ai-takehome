@@ -10,6 +10,13 @@ Generalization Round 2 把这条流水线收敛成两个权威：
   要求模型修正一次、或安全拒答**，绝不能在校验失败时把问题交给另一套
   Answerer 重新回答（历史缺陷 R2-D4：正确 raw answer 被判红后又被重答成错误答案）。
 
+Generalization Round 3 再加一条边界：
+
+* **Planner 决定业务范围，模型只决定"在这个范围内如何取得事实"。**
+  canonical Plan 以**结构化**形式进了 system 消息（`_initial_messages`）；
+  模型给的每个工具参数先过 `PlanToolPolicy`（`kbqa/toolpolicy.py`）：
+  缺失的按 Plan 补齐、冲突的**拒绝执行**并返回结构化错误，绝不静默覆盖。
+
     Planner → 规划；Tool → 事实；Retriever → 知识候选；
     DeepSeek → 组合回答；Finaliser → 验证。Finaliser 不是第四个 Answer Engine。
 """
@@ -33,12 +40,28 @@ from .ledger import (
 from .llm import LLMClient, LLMError
 from .planner import Plan
 from .schemas import Answer
+from .toolpolicy import PlanToolPolicy
 from .toolspec import TOOLS
 
 MAX_TOOL_ROUNDS = 6
 MAX_BAD_ARGS = 2
 _DOC_MARK = re.compile(r"[\[【]\s*(KB-\d+)\s*[\]】]")
 _YEAR_LIKE = re.compile(r"(20\d{2})\s*年")
+
+#: 结构化 plan context 的抬头。**同一份 system 消息里追加**，不新开一条 system
+#: 消息——OpenAI 兼容实现（含 DeepSeek）对多条 system message 的处理不一致。
+PLAN_CONTEXT_HEADER = (
+    "\n\n"
+    "【已解析的问题范围（应用层已经解析完成，可信）】\n"
+    "下面的 JSON 是本轮问题**已经由应用解析好**的范围：门店、商品、时间窗、指标、"
+    "以及需要查数据还是查文档。请直接采用它，**不要再自己猜**门店、商品、时间窗或指标。\n"
+    "工具调用必须落在 resolved_scope 之内：\n"
+    "* 缺省的门店/商品/时间窗可以直接采用 resolved_scope 里的值；\n"
+    "* 不要把范围换成别的门店、别的商品或别的时间段——那样的调用会被拒绝，"
+    "并返回一条结构化错误，请你按已解析的范围重新调用；\n"
+    "* resolved_scope 为 null 的字段表示「这一维不需要限定」（例如问排行时门店是开放的）。\n"
+    "已解析范围：\n"
+)
 
 #: 工具轮次用尽后的强制作答指令：让"没找到"以正文形式说出来，
 #: 而不是抛 LLMError 变成"工具调用没有收敛"这种评测不认的 refusal。
@@ -108,6 +131,8 @@ class LiveEngine:
         ledger = FactLedger()
         retrieved: dict[str, list] = {}
         bad_args = 0
+        # 泛化 R3：模型决定"在这个范围内怎么取事实"，但**范围本身**由 Plan 決定。
+        policy = PlanToolPolicy(plan)
 
         for _round in range(MAX_TOOL_ROUNDS):
             remaining = deadline - time.perf_counter()
@@ -142,14 +167,37 @@ class LiveEngine:
                         }
                     )
                     continue
+                # PlanToolPolicy：把模型给的参数约束在已解析的 scope 之内。
+                # 缺失的按 Plan 补齐；冲突的**拒绝执行**并把结构化错误返回给模型
+                # （不静默覆盖），这样现场调试能看出是模型漂移。
+                effective, scope_meta = policy.apply(name, params)
+                if scope_meta["status"] == "rejected":
+                    trace.step("tool_scope_rejected", scope_meta)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.get("id"),
+                            "content": json.dumps(
+                                {key: scope_meta.get(key) for key in
+                                 ("error", "field", "expected", "received", "message")},
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+                    continue
+                if scope_meta["status"] == "filled":
+                    trace.step("tool_scope_normalized", scope_meta)
+
                 started = time.perf_counter()
-                result = _as_json_object(self.run_tool(name, params))
-                trace.step("tool", {"tool": name, "params": params}, started=started)
+                result = _as_json_object(self.run_tool(name, effective))
+                trace.step("tool", {"tool": name, "params": effective,
+                                    "proposed": params}, started=started)
 
                 source = KNOWLEDGE_SOURCE if name == "search_kb" else DATA_SOURCE
                 if name == "search_kb":
-                    retrieved[json.dumps(params, ensure_ascii=False)] = result.get("results", [])
-                receipt = ledger.add(name, params, result, source=source)
+                    retrieved[json.dumps(effective, ensure_ascii=False)] = result.get("results", [])
+                # receipt 记录的是**实际执行的 params**（proposed 只进 trace 供调试）。
+                receipt = ledger.add(name, effective, result, source=source)
                 trace.step("tool_receipt_created", receipt.trace_detail())
 
                 # **模型看到的永远是 canonical 事实**（必要时结构化收缩），
@@ -187,6 +235,11 @@ class LiveEngine:
         system = SYSTEM_PROMPT.format(
             today=self.today, start=self.data_period["start"], end=self.data_period["end"]
         )
+        # 泛化 R3：把 canonical Plan 作为**结构化**的可信上下文交给模型。
+        # 以前只有自然语言的 standalone，模型必须自己再解析一遍门店/商品/时间/指标，
+        # 于是 Planner 认对了、模型又猜错了。现在解析结果直接下传。
+        system += PLAN_CONTEXT_HEADER + json.dumps(
+            plan.as_model_context(), ensure_ascii=False, indent=2)
         messages = [{"role": "system", "content": system}]
         for turn in history[-3:]:
             messages.append({"role": "user", "content": turn.get("question", "")})
