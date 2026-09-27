@@ -11,12 +11,14 @@ import json
 import os
 import sqlite3
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -243,6 +245,10 @@ class ServiceHandle:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=10)
+        # On Windows the child can report exited a fraction before SQLite has
+        # released its file handles.  Let the OS finish that handoff before a
+        # disposable variant root is removed.
+        time.sleep(0.25)
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict:
         data = None
@@ -276,6 +282,12 @@ def _generated_ids(seed: int) -> tuple[str, str]:
     # Keep the first generated family in the two-digit range understood by the
     # current entity parser while still deriving the IDs from the seed.
     number = 91 + (abs(seed) % 9)
+    return "S%02d" % number, "P%02d" % number
+
+
+def _secondary_generated_ids(seed: int) -> tuple[str, str]:
+    """Return the second generated entity while staying in the two-digit family."""
+    number = 91 + ((abs(seed) + 1) % 9)
     return "S%02d" % number, "P%02d" % number
 
 
@@ -321,8 +333,7 @@ def make_data_variant(root: Path, *, seed: int, family: str = "values") -> DataV
         ])
         end = "2026-07-06"
     elif family == "entities":
-        second_store = "S%02d" % (91 + ((abs(seed) + 1) % 9))
-        second_product = "P%02d" % (91 + ((abs(seed) + 1) % 9))
+        second_store, second_product = _secondary_generated_ids(seed)
         stores.append((second_store, "R6 第二动态门店 %d" % seed, "R6 新分类", "R6 新区域"))
         products.append((second_product, "R6 Second Dynamic Product %d" % seed, "R6 新商品类", float(base + 7)))
         rows.append(("R6-%d-5" % seed, "2026-07-05", second_store, second_product, "2", "%.2f" % (base * 5.5), "现金"))
@@ -793,7 +804,7 @@ def scenario_bank(*, seed: int, data: DataVariant, kb: KBVariant) -> list[Scenar
         end=data.end,
         store_id=data.store_id,
     )
-    second_store = "S%02d" % (int(data.store_id[1:]) + 1)
+    second_store, _ = _secondary_generated_ids(seed)
     return [
         Scenario(
             name="metric-change",
@@ -953,6 +964,23 @@ def _scenario_summary(result: ScenarioResult) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _temporary_variant_root():
+    """Yield a disposable root and retry Windows cleanup for bounded time."""
+    root = Path(tempfile.mkdtemp(prefix="r6-hidden-"))
+    try:
+        yield root
+    finally:
+        for attempt in range(50):
+            try:
+                shutil.rmtree(root)
+                break
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.1)
+
+
 def run_variant(
     *,
     seed: int,
@@ -963,8 +991,7 @@ def run_variant(
     include_all_scenarios: bool = True,
 ) -> dict[str, Any]:
     """Build and exercise one disposable generated data/KB pair."""
-    with tempfile.TemporaryDirectory(prefix="r6-hidden-") as temporary:
-        root = Path(temporary)
+    with _temporary_variant_root() as root:
         data = make_data_variant(root, seed=seed, family=data_family)
         kb = make_kb_variant(root, seed=seed, family=kb_family, store_id=data.store_id)
         snapshot = rebuild_variant(data, kb, live=mode == "live")
