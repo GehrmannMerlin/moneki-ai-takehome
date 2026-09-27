@@ -413,7 +413,8 @@ def test_red11_citation_quote_comes_from_retrieved_chunk(tmp_path, monkeypatch):
     assert answer.citations, "没有生成任何引用"
     from kbqa.core.textnorm import normalize_doc
 
-    assert any(normalize_doc(c["quote"]) in normalize_doc(text) for text in retrieved.values()), (
+    assert any(normalize_doc(citation["quote"]) in normalize_doc(text)
+               for citation in answer.citations for text in retrieved.values()), (
         "citation.quote 不来自本轮检索到的 chunk（回到了整篇文档里另挑）：%r"
         % [c["quote"] for c in answer.citations])
 
