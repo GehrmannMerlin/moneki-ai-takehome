@@ -1643,6 +1643,14 @@ def _is_timeout(exc: BaseException) -> bool:
     连接被拒绝、域名解析不了、连接被重置都**不是**超时：那种情况下服务根本没有在跑，
     不能说它“超时”。区分这两者是 P11 不说假话的前提。
     """
+    # urllib wraps a connect timeout as ``URLError(reason=TimeoutError)``.
+    # That means no HTTP response was ever received, so it is an unreachable
+    # service for P11's purposes.  A read timeout, by contrast, is raised as a
+    # bare TimeoutError by the already-connected socket and is a real timing
+    # sample.  Keep these cases distinct instead of treating every nested
+    # TimeoutError as a server hang.
+    if isinstance(exc, urllib.error.URLError):
+        return False
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))

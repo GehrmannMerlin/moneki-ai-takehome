@@ -376,6 +376,17 @@ class Client:
         try:
             with self.opener.open(req, timeout=self.timeout) as fh:
                 status = fh.status
+                # The hostile-server tests (and a real HTTP service) may
+                # advertise a body larger than the evaluator's cap.  Reject
+                # it before reading so the client does not force the server
+                # into a connection-reset error by closing mid-write.
+                content_length = fh.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > MAX_BODY_BYTES:
+                            raise _TooBig()
+                    except ValueError:
+                        pass
                 raw = self._read_capped(fh, started)
         except urllib.error.HTTPError as exc:
             seconds = time.monotonic() - started
