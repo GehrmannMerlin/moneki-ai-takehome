@@ -922,6 +922,85 @@ def content_key(kb_dir: Path) -> str:
 
 ---
 
+## 缺陷 #60：SessionStore 的 session-level slots 没有进入 Service 主链【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | 成功调用 `Service.chat(session_id, question)` 后，`sessions.slots(session_id)` 仍为空；Service 只读取 `history()`，没有加载或保存 session-level semantic state。 |
+| **假设** | 已有 `sessions` 表和 `slots()/save_slots()` 就代表主链已经有状态（**错误**）。 |
+| **验证实验** | `pytest tests/generalization/test_conversation_state.py -q`：`test_successful_turn_persists_semantics_but_not_answer_numbers` 首轮即失败，实际 `{}`。 |
+| **根因文件/函数** | `starter/kbqa/service.py::Service._answer` 只调用 `history()`/`append()`，没有 `load_state()`/`save_state()`。 |
+| **RED test / evidence** | `test_successful_turn_persists_semantics_but_not_answer_numbers`；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 STATE 阶段。 |
+
+## 缺陷 #61：FollowUps 依赖上一轮与 standalone 字符串重写【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `那 S02 呢？` 这类单槽位覆盖会在拼接后的旧 standalone 中先命中上一轮门店；`营业额呢？` 会重新落回默认全周期而丢失 July。事件追问的 search query 也带回旧的“七月”文本。 |
+| **假设** | 删除旧时间词并拼接两句自然语言足以完成语义继承（**错误**）。 |
+| **验证实验** | R5 RED：`test_store_override_does_not_discard_product_window_or_metric`、`test_metric_override_does_not_discard_product_or_window`、`test_event_topic_continuity_does_not_reuse_stale_time`。 |
+| **根因文件/函数** | `starter/kbqa/followup.py::FollowUps.resolve` 使用 `history[-1]`、previous standalone 与 `_topic_terms()`；`starter/kbqa/planner.py::Planner.plan` 接收 raw history。 |
+| **RED test / evidence** | 上述三个测试；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 FOLLOWUP 阶段。 |
+
+## 缺陷 #62：recent_windows 仍是上一 turn slots 的复制品【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `recent_windows` 在 Planner 末尾写入 `plan.slots`，下一轮再从上一 turn 的 slots 读取；文档问题生成的 default whole-period window 也可能被混入历史窗口。 |
+| **假设** | 把 `plan.window` 每轮写入 turn slots 就等价于 session-level semantic state（**错误**）。 |
+| **验证实验** | R5 RED：`test_two_recent_windows_are_state_not_previous_turn_text` 与 `test_default_document_window_does_not_pollute_recent_windows`。 |
+| **根因文件/函数** | `starter/kbqa/planner.py::Planner.plan` 的 `inherited + [plan.window]` 逻辑；不存在独立 state transition。 |
+| **RED test / evidence** | 上述两个测试；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 STATE/TRANSITION 阶段。 |
+
+## 缺陷 #63：上一轮 assistant business answer 被重新注入 Live 上下文【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | LiveEngine 将最近三轮 `question` 与 `answer` 作为 user/assistant 消息再次传给模型；故意伪造的 `营业额=777777` 在下一次请求中可见。 |
+| **假设** | 更多 transcript 能帮助模型理解多轮语义，且不会成为事实（**错误**）。 |
+| **验证实验** | R5 RED：`test_live_cross_turn_assistant_answer_is_not_factual_context`，消息 JSON 明确包含 `777777`。 |
+| **根因文件/函数** | `starter/kbqa/live.py::LiveEngine._initial_messages`。 |
+| **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 LIVE 阶段；同 turn 的 assistant/tool/reasoning 消息仍需保留。 |
+
+## 缺陷 #64：max_turns 只限制读取，没有物理 retention【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `max_turns=3` 写入 10 轮后，SQLite `turns` 实际仍有 10 行；只有 SELECT 使用了 LIMIT。 |
+| **假设** | API `history()` 返回 3 行即可视为资源上限成立（**错误**）。 |
+| **验证实验** | R5 RED：`test_sqlite_turn_retention_prunes_physical_rows`，实际 `COUNT(*) == 10`。 |
+| **根因文件/函数** | `starter/kbqa/core/store.py::SessionStore.append`。 |
+| **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 STORAGE 阶段。 |
+
+## 缺陷 #65：max_sessions 没有真实 LRU eviction【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | A/B/C 建立、更新 A、再创建 D 后，B 的 turns 与 slots 仍然存在；SessionStore 没有按最近访问淘汰会话。 |
+| **假设** | `MAX_SESSIONS` 常量或 session 表本身会自动限制会话数量（**错误**）。 |
+| **验证实验** | R5 RED：`test_max_sessions_evicts_lru_turns_and_state`，`store.slots("B")` 仍返回 B。 |
+| **根因文件/函数** | `starter/kbqa/core/store.py::SessionStore`；Service 也没有传入 max_sessions。 |
+| **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 STORAGE 阶段；traces 不得随 session eviction 删除。 |
+
+## 缺陷 #66：semantic state 没有 epoch 绑定与 restart API【泛化 R5 待修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | SessionStore 没有 `load_state(session_id, epoch)`；因此同一 app.db 在数据/KB rebuild 后无法识别旧实体状态，也没有独立语义 state 的 restart contract。 |
+| **假设** | 保留旧 SQLite 是正确的，所以其中所有 session semantic memory 都可以继续使用（**错误**）。 |
+| **验证实验** | R5 RED：`test_state_survives_store_restart` 与 `test_stale_epoch_invalidates_old_state`，API 缺失。 |
+| **根因文件/函数** | `starter/kbqa/core/store.py` 的 `sessions.slots` 只存无版本 slots；`starter/kbqa/service.py::Service.rebuild` 已有 data/KB fingerprints 但未形成 conversation epoch。 |
+| **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
+| **修复 / GREEN** | 待 R5 STATE 阶段；失效需写 trace，不能清 traces。 |
+
+---
+
 ## 附：现场调试演练计时（P5 §3，模拟评委 40 分钟环节）
 
 | 演练 | 题目 | 定位耗时 | 修复+回归测试 | 方法论回放 |
