@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,58 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import r6_hidden_stress as r6  # noqa: E402
+
+
+def test_citation_chunk_selection_uses_answer_claim_when_query_is_broad():
+    from kbqa.citations import build_citations
+    from kbqa.ledger import FactLedger, KNOWLEDGE_SOURCE
+    from kbqa.trace import Trace
+
+    class Facts:
+        index = SimpleNamespace(docs_meta={"KB-R6": {}})
+
+        @staticmethod
+        def cite(doc_id, quote):
+            return {"doc_id": doc_id, "quote": quote}
+
+    ledger = FactLedger()
+    ledger.add(
+        "search_kb",
+        {"query": "外卖订单退款申请"},
+        {
+            "results": [
+                {
+                    "doc_id": "KB-R6",
+                    "chunk_id": "KB-R6#1",
+                    "score": 10,
+                    "source_text": "退款政策：外卖订单申请受理窗口与凭证要求。",
+                    "text": "退款政策：外卖订单申请受理窗口与凭证要求。",
+                },
+                {
+                    "doc_id": "KB-R6",
+                    "chunk_id": "KB-R6#2",
+                    "score": 8,
+                    "source_text": "外卖订单在送达后 24 小时内提出，超过 24 小时不再受理。",
+                    "text": "外卖订单在送达后 24 小时内提出，超过 24 小时不再受理。",
+                },
+            ]
+        },
+        source=KNOWLEDGE_SOURCE,
+    )
+    plan = SimpleNamespace(search_query="外卖订单退款申请", standalone="", question="外卖订单多久能退款？")
+    trace = Trace("r6-citation-claim", plan.question)
+
+    citations = build_citations(
+        plan,
+        ["KB-R6"],
+        ledger,
+        Facts(),
+        trace,
+        claim_text="外卖订单在送达后 24 小时内提出。",
+    )
+
+    assert citations
+    assert "24 小时" in citations[0]["quote"]
 
 
 def test_generated_data_variant_has_seeded_nonpublic_entities_and_direct_oracle(tmp_path):
