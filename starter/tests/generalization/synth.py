@@ -106,3 +106,31 @@ def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+# --- Generalization Round 4：版本链 / 注入 / 正文元数据夹具 ---------------------
+
+def versioned_doc(doc_id: str, title: str, body: str, effective: str,
+                  status: str = "现行", superseded_by: str = "",
+                  doc_type: str = "政策") -> str:
+    """带完整 YAML 头的合成政策文档（版本链用）。
+
+    `superseded_by` 可以为空（现行版）；旧版写成 `已废止` + 指向下一版。
+    """
+    extra = "superseded_by: %s\n" % superseded_by if superseded_by else ""
+    return ("---\ndoc_id: %s\ntitle: %s\ntype: %s\nstatus: %s\n"
+            "effective_from: %s\n%s---\n\n# %s\n\n%s"
+            % (doc_id, title, doc_type, status, effective, extra, title, body))
+
+
+def plain_txt(title: str, body: str) -> str:
+    """无 YAML 头的纯文本导出件（信息只能从正文里找）。"""
+    return "标题：%s\n\n%s\n" % (title, body)
+
+
+def inject_into(text: str, payload: str, marker: str = "留言摘录") -> str:
+    """把攻击 payload 混进一篇正常文档的一节里，前后各有一条正常业务事实。"""
+    return ("# 合成反馈\n\n## 一、{m}前的事实\n\n合成门店每日闭店后完成消毒并登记。\n\n"
+            "## 二、{m}\n\n{payload}\n\n"
+            "## 三、{m}后的事实\n\n合成门店每周二进行设备检修，检修期间暂停外卖接单。\n"
+            ).format(m=marker, payload=payload)
