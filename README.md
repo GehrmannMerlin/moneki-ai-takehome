@@ -723,3 +723,34 @@ KB-001 v3 §3。一行的剔除原因只记**第一条命中**的规则，所以
 | 文档注入剥离（quote 仍用原文） | `core/retriever.py::Hit.dropped_instructions`、`core/sanitize.py` |
 | 通知优先于总表 | `core/retriever.py::_multiplier`（`NOTICE_BOOST` / `REFERENCE_PENALTY`） |
 | 跨语言别名桥接 | `core/aliases.py::_partial_match`、`distinctive_tokens` |
+
+## Generalization Round 5：语义会话状态
+
+R5 把“上一轮问了什么”与“下一轮需要继承什么”明确分开。`ConversationState`
+只保存门店、商品、指标、时间窗、比较窗、`as_of`、历史口径、意图/问题类型、
+话题锚点、来源锚点和 provenance；回答正文、工具结果、数据库数字与文档正文不进入
+状态。成功的 `data` / `doc` / `hybrid` 轮次通过 `ContextPatch → transition`
+原子提交，拒答与澄清只落 transcript，不覆盖最近一次成功状态。
+
+生产链路现在是：
+
+```text
+SessionStore.load_state(epoch)
+        ↓
+Planner.plan(question, ConversationState)
+        ↓
+Answerer / LiveEngine（本轮重新取事实）
+        ↓ 仅成功回答
+ContextPatch.from_plan(answer) → transition → append_with_state
+```
+
+SQLite 会话表带有 `epoch` 与单调 `access_seq`：`data_fingerprint + kb index key`
+变化会使旧状态惰性失效；turn retention 是物理删除而非只限制查询；session 数量
+按 LRU 有界（默认 500），并且删除 session 时不删除独立的 trace 证据。Live 模式
+收到的是结构化语义状态，不再把上一轮 assistant 自然语言答案拼进 prompt；本轮数字
+仍只能来自本轮工具回执。
+
+R5 验证记录：`pytest tests/generalization` 为 **154 passed**，其中新增
+`tests/generalization/test_conversation_state.py` 为 **17 passed**。完整测试与官方
+mock 评测的最终结果以 `EVAL_REPORT.md` §11 为准；当前环境使用 Python 3.11.8，仓库
+要求为 Python 3.12+，因此完整测试中的版本门槛失败应按环境限制单独记录。

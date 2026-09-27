@@ -333,3 +333,26 @@ python eval/llm_gateway.py preflight --service-url http://localhost:8000
 
 本机的预检输出（**P1–P14 全部通过**）贴在 `LLM_SETUP.md` §7 与
 `eval/_preflight/preflight_report.md`。
+
+## 4.6 泛化 R5：查看语义会话状态
+
+R5 的连续性不靠把上一轮回答重新喂给模型。每次成功回答后，SQLite 的 `sessions.slots`
+保存的是结构化 `ConversationState`，例如指标、实体、时间窗、比较窗与话题锚点；回答
+正文和本轮业务数字不保存为下一轮事实。可以用下面的 Python 片段直接检查状态（从
+`starter` 目录运行）：
+
+```python
+from kbqa.config import load_settings
+from kbqa.service import Service
+
+service = Service(load_settings())
+service.chat("demo-r5", "6 月的净营业额是多少？")
+print(service.sessions.load_state("demo-r5", service.context_epoch).to_dict())
+```
+
+然后继续问 `那 7 月呢？` 或 `这两个月的客单价差了多少？`。trace 中可看到
+`session_state_before`、`plan`、`session_state_after`；如果数据或知识库产物变化，
+则会看到 `session_state_invalidated`，旧语义状态不会静默跨 epoch 复用。
+
+Live 模式的 prompt 只包含本轮 Plan 与上述结构化 state，不包含上一轮 assistant 文本。
+因此即使 transcript 中有旧答案，模型仍必须为当前轮重新调用工具取得数字。

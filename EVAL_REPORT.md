@@ -858,3 +858,41 @@ python eval/run_eval.py --base-url http://localhost:8000 \
     --questions eval/public_questions.jsonl --out eval/_baseline_raw
 cd starter && .venv/Scripts/python scripts/baseline_report.py --markdown
 ```
+
+## §11 Generalization Round 5：Semantic Conversation State（2026-09-27）
+
+### §11.1 目标与边界
+
+R5 只处理跨轮语义连续性：transcript 负责诊断展示，`ConversationState` 负责下一轮
+Planner 的 canonical 输入，当前轮工具回执负责事实。状态不保存 assistant 回答、工具
+结果或文档正文；新话题替换旧实体范围，拒答/澄清不覆盖最近一次成功状态。
+
+### §11.2 实现结果
+
+| 层 | 结果 |
+|---|---|
+| `conversation.py` | `ConversationState`、`ContextPatch`、成功轮次 `transition`，默认文档时间窗不进入 recent windows |
+| `core/store.py` | SQLite `epoch`/`access_seq`，物理 turn retention，默认 500 会话 LRU，重启安全，trace 与 session eviction 分离 |
+| `followup.py` / `planner.py` | 确定性 semantic Resolution；实体、指标、时间独立覆盖；事件话题不复用陈旧时间；Planner 保持唯一规划权威 |
+| `service.py` | 计算 `data_fingerprint + kb index key` epoch；仅 `data/doc/hybrid` 成功轮次原子写入 state；refusal/clarify 保留原状态 |
+| `live.py` | 注入结构化语义状态，移除上一轮自然语言 user/assistant 消息，事实仍要求本轮工具取得 |
+
+### §11.3 测试与评测
+
+| 检查 | 结果 |
+|---|---:|
+| R5 RED 快照（commit `639e0d0`） | 13 failed / 4 passed（故意红） |
+| R5 状态回归 `pytest tests/generalization/test_conversation_state.py -q` | **17 passed** |
+| 泛化套件 `pytest tests/generalization` | **154 passed** |
+| 官方 mock `eval/run_eval.py`（实现前基线；实现后最终复跑） | **100.00 / 100.00；100.00 / 100.00** |
+| 完整后端 `pytest tests` | 387 passed / 1 failed：当前解释器 3.11.8 未满足仓库 Python ≥3.12 门槛 |
+| 真实 Key live 评测 | **NOT RUN**：本机未配置 `LLM_API_KEY` |
+
+官方 mock 评分未因 R5 代码改动降低：基线与最终复跑均为 **100.00 / 100.00**。
+Python 版本失败是环境前置条件，不将其改写成代码通过。
+
+### §11.4 已知边界
+
+R5 没有改变 R4 的引用、sanitize、FactLedger 或评测判分逻辑，也没有声称真实模型
+在本机已复验。`ConversationState` 的来源锚点只帮助下一轮检索定位，不能替代本轮
+证据；context epoch 变化后旧 state 只返回空状态并写入 trace 的 invalidation 事件。

@@ -931,7 +931,7 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | `pytest tests/generalization/test_conversation_state.py -q`：`test_successful_turn_persists_semantics_but_not_answer_numbers` 首轮即失败，实际 `{}`。 |
 | **根因文件/函数** | `starter/kbqa/service.py::Service._answer` 只调用 `history()`/`append()`，没有 `load_state()`/`save_state()`。 |
 | **RED test / evidence** | `test_successful_turn_persists_semantics_but_not_answer_numbers`；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 STATE 阶段。 |
+| **修复 / GREEN** | `603e3d4` 增加 `ConversationState`/`ContextPatch` 与 SQLite state API；`b9a7f01` 在 Service 成功轮次用 `transition` + `append_with_state` 原子提交。R5 state suite 通过。 |
 
 ## 缺陷 #61：FollowUps 依赖上一轮与 standalone 字符串重写【泛化 R5 待修复】
 
@@ -942,7 +942,7 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | R5 RED：`test_store_override_does_not_discard_product_window_or_metric`、`test_metric_override_does_not_discard_product_or_window`、`test_event_topic_continuity_does_not_reuse_stale_time`。 |
 | **根因文件/函数** | `starter/kbqa/followup.py::FollowUps.resolve` 使用 `history[-1]`、previous standalone 与 `_topic_terms()`；`starter/kbqa/planner.py::Planner.plan` 接收 raw history。 |
 | **RED test / evidence** | 上述三个测试；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 FOLLOWUP 阶段。 |
+| **修复 / GREEN** | `a34c2b2` 用 `Resolution` 和独立槽位合并替代字符串重写；`2dab329` 为事件话题隔离陈旧时间；`f22cc00` 保留时间-only follow-up 的上一轮语义 kind。相关 R5 与 T01–T03 回归通过。 |
 
 ## 缺陷 #62：recent_windows 仍是上一 turn slots 的复制品【泛化 R5 待修复】
 
@@ -953,7 +953,7 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | R5 RED：`test_two_recent_windows_are_state_not_previous_turn_text` 与 `test_default_document_window_does_not_pollute_recent_windows`。 |
 | **根因文件/函数** | `starter/kbqa/planner.py::Planner.plan` 的 `inherited + [plan.window]` 逻辑；不存在独立 state transition。 |
 | **RED test / evidence** | 上述两个测试；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 STATE/TRANSITION 阶段。 |
+| **修复 / GREEN** | `a34c2b2` 将 recent windows 留在 Planner 的语义输出；`b9a7f01` 由 `transition` 按 provenance 提交，default document window 不进入 state。 |
 
 ## 缺陷 #63：上一轮 assistant business answer 被重新注入 Live 上下文【泛化 R5 待修复】
 
@@ -964,7 +964,7 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | R5 RED：`test_live_cross_turn_assistant_answer_is_not_factual_context`，消息 JSON 明确包含 `777777`。 |
 | **根因文件/函数** | `starter/kbqa/live.py::LiveEngine._initial_messages`。 |
 | **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 LIVE 阶段；同 turn 的 assistant/tool/reasoning 消息仍需保留。 |
+| **修复 / GREEN** | `b9a7f01` 的 `_initial_messages` 移除跨轮 user/assistant transcript，只注入结构化 state；同一轮的 assistant/tool/reasoning 消息仍按 Live 工具协议保留。 |
 
 ## 缺陷 #64：max_turns 只限制读取，没有物理 retention【泛化 R5 待修复】
 
@@ -975,7 +975,7 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | R5 RED：`test_sqlite_turn_retention_prunes_physical_rows`，实际 `COUNT(*) == 10`。 |
 | **根因文件/函数** | `starter/kbqa/core/store.py::SessionStore.append`。 |
 | **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 STORAGE 阶段。 |
+| **修复 / GREEN** | `603e3d4` 在 `append_with_state` transaction 内物理删除超限旧 turns；retention 断言通过。 |
 
 ## 缺陷 #65：max_sessions 没有真实 LRU eviction【泛化 R5 待修复】
 
@@ -986,7 +986,7 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | R5 RED：`test_max_sessions_evicts_lru_turns_and_state`，`store.slots("B")` 仍返回 B。 |
 | **根因文件/函数** | `starter/kbqa/core/store.py::SessionStore`；Service 也没有传入 max_sessions。 |
 | **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 STORAGE 阶段；traces 不得随 session eviction 删除。 |
+| **修复 / GREEN** | `603e3d4` 用 `access_seq` 做 bounded LRU，并只删除被淘汰 session 的 turns/state，不触碰独立 `traces` 表。 |
 
 ## 缺陷 #66：semantic state 没有 epoch 绑定与 restart API【泛化 R5 待修复】
 
@@ -997,7 +997,23 @@ def content_key(kb_dir: Path) -> str:
 | **验证实验** | R5 RED：`test_state_survives_store_restart` 与 `test_stale_epoch_invalidates_old_state`，API 缺失。 |
 | **根因文件/函数** | `starter/kbqa/core/store.py` 的 `sessions.slots` 只存无版本 slots；`starter/kbqa/service.py::Service.rebuild` 已有 data/KB fingerprints 但未形成 conversation epoch。 |
 | **RED test / evidence** | 上述测试；`docs/_r5_red.txt`。 |
-| **修复 / GREEN** | 待 R5 STATE 阶段；失效需写 trace，不能清 traces。 |
+| **修复 / GREEN** | `603e3d4` 增加 epoch-aware `load_state/save_state`；`b9a7f01` 用 `sha256(data_fingerprint + kb_index_key)` 生成 Service epoch，并将失效写入 trace。 |
+
+## 缺陷 #67：证据参数中的 null 被字符串化成伪时间窗【泛化 R5 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | mock 数据证据的非区间参数带有 `start=None/end=None` 时，`ContextPatch` 的通用窗口归一化把它们变成了 `("None", "None")`；该伪窗口污染 recent windows，后续比较会落到越界或空数据。 |
+| **根因** | `_window()` 只检查长度与 `str()` 后非空，没有在字符串化前拒绝 `None`/`"None"`。 |
+| **修复 / GREEN** | `b9a7f01` 让 `_window()` 在归一化前拒绝空值与伪日期；R5 17 条状态测试、泛化套件 154 条通过。 |
+
+## 缺陷 #68：时间-only continuation 丢失上一轮的业务 kind【泛化 R5 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | T03 首轮是“现在多少钱一份”（`hybrid/price`），第二轮只改日期“那 6 月 18 号那天呢？”时被降成 `data/summary`，因此缺少 KB-023 的 29 元价格引用。 |
+| **根因** | semantic state 已保存 `kind=price`，但 Planner 只从当前短句词面决定 kind；当前句没有“价格”词时，实体/时间继承只触发通用数据路线。 |
+| **修复 / GREEN** | `f22cc00` 将上一轮 `intent/kind` 纳入 Resolution；无新指标/政策/事件操作的 time-only continuation 保留上一轮 kind。最终官方 mock `eval/run_eval.py` 为 **100.00 / 100.00**，T03 全绿。 |
 
 ---
 

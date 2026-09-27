@@ -476,3 +476,24 @@ Git Bash 改写 `/ds-gw` 前缀——在 `preflight_driver_r4.py` 里已经固�
        不会被识别成排行意图（这是**既有**行为，本轮没有往词表里加词——避免在
        未验证的情况下引入新的误判）。两个缺口都只在"完全没提到其他指标"时才影响
        到答案形状，公开题库与泛化套件均为绿。
+
+### 7.8 泛化 R5：Live 只接收结构化会话状态
+
+R5 后 Service 在每轮开始按 `context_epoch` 读取 `ConversationState`，Planner 直接消费
+它，不再把 SQLite transcript 传给 FollowUps 做自然语言重写。成功的 `data`、`doc`、
+`hybrid` 回答才会生成 `ContextPatch` 并与 turn 在一次 SQLite transaction 中提交；
+拒答与澄清只保留 transcript，语义 state 不变。
+
+Live 的 system context 现在有两块可信输入：本轮 `Plan` 与结构化会话 state。上一轮
+assistant 的完整答案不进入 prompt，因此旧轮次的数字不会被模型误当成当前事实；任何
+当前轮经营数字仍必须从当前轮工具回执取得。没有 API Key 时继续使用 mock Answerer，
+不会因为新增状态层改变启动方式。
+
+上下文失效规则：`context_epoch = sha256(data_fingerprint + kb_index_key)`。数据或知识库
+产物变化后，旧 session state 读取为空并在 trace 写 `session_state_invalidated`；trace
+本身不随 session LRU 清理。SQLite 默认 `max_turns=12`、`max_sessions=500`，前者物理
+删除旧 turn，后者按 access sequence 淘汰最久未访问 session。
+
+R5 本机验证：`pytest tests/generalization/test_conversation_state.py -q` 为 **17 passed**，
+`pytest tests/generalization` 为 **154 passed**；真实 live 评测因未配置
+`LLM_API_KEY` 仍为 **NOT RUN**。
