@@ -8,12 +8,14 @@ from typing import Any, Optional
 
 from .answerer import Answerer
 from .schemas import Answer
+from .authority import authority_of, numeric_authority_of
 from .core import guard
 from .core.cleaning import build_clean_db
 from .core.datatools import DataTools
 from .core.index import load_index
 from .core.metrics import MetricsEngine
 from .core.retriever import Retriever
+from .core.sanitize import sanitize
 from .core.store import SessionStore, TraceStore
 from .docfacts import DocFacts
 from .config import Settings, load_settings
@@ -26,6 +28,11 @@ from .trace import Trace
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _INT_PARAMS = {"top_k", "limit"}
+
+#: `search_kb` 的**结构化范围**参数：由 LiveEngine 从 canonical Plan 填充，
+#: 模型不需要、也不应该自己设置——它们不在工具 schema 里。放在这里是为了
+#: `run_tool` 能从 params 里认出它们，同时不污染给模型看的工具定义。
+_KNOWLEDGE_SCOPE_KEYS = ("as_of", "store_id", "historical", "year", "window", "numeric")
 
 
 def _as_json_object(result):
@@ -45,6 +52,33 @@ def _as_json_object(result):
     if isinstance(result, dict):
         return result
     return {"value": result}
+
+
+def _as_date(value):
+    """把 JSON 边界来的日期（`"2026-03-31"`）还原成 `date`；已是 date 就原样返回。"""
+    from datetime import date as _date_cls
+
+    if value is None or isinstance(value, _date_cls):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        year, month, day = (int(part) for part in text[:10].split("-"))
+        return _date_cls(year, month, day)
+    except (ValueError, TypeError):
+        return None
+
+
+def _as_window(value):
+    """把 `["2026-03-01", "2026-03-31"]` 还原成 Retriever 要的 `(start, end)`。"""
+    if not value:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        start, end = str(value[0]).strip(), str(value[1]).strip()
+        if start and end:
+            return (start, end)
+    return None
 
 
 class Service:
@@ -136,16 +170,81 @@ class Service:
         """契约 §4：片段够就恰好给 top_k 条，不够才少给。
 
         `top_k` 大于索引里的片段总数时按总数封顶——这正是契约允许少给的那种情况。
+
+        **这是面向人/evaluator 的公开接口**：返回**原文**（含可能存在的攻击句），
+        引用逐字校验对的就是它。live 模型走的是下面的 `retrieve_for_model`。
         """
         wanted = max(1, min(int(top_k or 5), len(self.index.chunks) or 1))
         result = self.retriever.search(query or "", top_k=wanted)
         return {"results": [hit.as_result() for hit in result.hits]}
+
+    def retrieve_for_model(self, query: str, top_k: int = 5, as_of=None,
+                           store_id=None, year=None, window=None, numeric=False,
+                           historical=None) -> dict:
+        """live 模型专用的检索投影：**安全文本 + 溯源元数据**，绝不回原始来源。
+
+        与公开 `retrieve()` 的三点区别（R4 信任边界）：
+
+        * 只给**真正命中**的片段（`ranked`）——凑数的 padded 片段不是证据；
+        * `text` 是 sanitize 之后的安全文本；原始来源放在 `source_text` /
+          `source_dropped`，它们会被 `FactLedger.model_projection` 摘掉，
+          **永不进模型上下文**（citation 与 trace 仍用原始来源）；
+        * 每条附带来源权威与版本元数据，并回带本次检索的结构化 scope 与过滤明细。
+
+        `as_of` / `window` 允许是字符串/列表（从 JSON 边界来），这里统一还原成
+        `date` / `tuple` 再交给 Retriever。
+        """
+        scope = {
+            "as_of": _as_date(as_of),
+            "store_id": store_id,
+            "year": int(year) if year not in (None, "") else None,
+            "window": _as_window(window),
+            "numeric": bool(numeric),
+            "historical": historical,
+        }
+        result = self.retriever.search(
+            query or "", top_k=max(1, int(top_k or 5)),
+            as_of=scope["as_of"], store_id=scope["store_id"], year=scope["year"],
+            window=scope["window"], numeric=scope["numeric"],
+            historical=scope["historical"],
+        )
+        items = []
+        for hit in result.ranked:
+            meta = hit.meta or {}
+            safe_text, dropped = sanitize(hit.text)
+            items.append({
+                "doc_id": hit.doc_id,
+                "chunk_id": hit.chunk_id,
+                "score": round(hit.score, 4),
+                "text": safe_text,
+                "authority": authority_of(meta),
+                "numeric_authority": numeric_authority_of(meta),
+                "effective_from": meta.get("effective_from"),
+                "status": meta.get("status") or meta.get("state"),
+                "sanitized": bool(dropped),
+                "dropped_instructions": len(dropped),
+                # 原始来源：仅供应用内部做 citation / trace，绝不给模型。
+                "source_text": hit.text,
+                "source_dropped": dropped,
+            })
+        return {
+            "results": items,
+            "scope": {
+                "as_of": as_of if isinstance(as_of, str) else scope["as_of"].isoformat()
+                if scope["as_of"] else None,
+                "store_id": scope["store_id"],
+                "historical": historical,
+            },
+            "filtered": result.filtered,
+        }
 
     # -- 工具执行（live 模式下由模型驱动） ---------------------------------------
 
     def run_tool(self, name: str, params: dict) -> dict:
         if name not in TOOL_NAMES:
             return {"error": "没有这个工具：%s，可用工具：%s" % (name, "、".join(TOOL_NAMES))}
+        if name == "search_kb":
+            return self._run_search_kb(params or {})
         schema = next(
             tool["function"]["parameters"] for tool in TOOLS if tool["function"]["name"] == name
         )
@@ -170,8 +269,6 @@ class Service:
             if key not in cleaned:
                 return {"error": "缺少必填参数 %s" % key}
         try:
-            if name == "search_kb":
-                return self.retrieve(cleaned["query"], cleaned.get("top_k", 5))
             # R2-D5：标量/None 结果在这里统一成 JSON object，不让 TypeError 冒到 live 循环。
             return _as_json_object(getattr(self.tools, name)(**cleaned))
         except (TypeError, ValueError) as exc:
@@ -179,6 +276,26 @@ class Service:
         except AttributeError:
             # 工具声明与实现不同步时给结构化错误，不要让 /api/chat 变成 500
             return {"error": "没有这个工具：%s，可用工具：%s" % (name, "、".join(TOOL_NAMES))}
+
+    def _run_search_kb(self, params: dict) -> dict:
+        """`search_kb` 的执行：query/top_k 来自模型，范围来自 Plan（应用填充）。
+
+        范围参数（as_of/store/historical/window/year）不在给模型看的工具 schema 里，
+        由 LiveEngine 从 canonical Plan 注入；模型就算硬塞也会被覆盖（见 LiveEngine）。
+        """
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return {"error": "缺少必填参数 query"}
+        try:
+            top_k = int(params.get("top_k", 5))
+        except (TypeError, ValueError):
+            return {"error": "参数 top_k 应该是整数，收到 %r" % params.get("top_k")}
+        scope = {key: params.get(key) for key in _KNOWLEDGE_SCOPE_KEYS
+                 if params.get(key) is not None}
+        try:
+            return self.retrieve_for_model(query, top_k=top_k, **scope)
+        except (TypeError, ValueError) as exc:
+            return {"error": "工具 search_kb 执行失败：%s" % exc}
 
     # -- 问答 -------------------------------------------------------------------
 

@@ -29,6 +29,7 @@ import time
 from typing import Any, Callable, Optional
 
 from .answerer import Answerer
+from .citations import build_citations
 from .core.numbers import extract_date_parts, extract_numbers
 from .ledger import (
     DATA_SOURCE,
@@ -129,7 +130,7 @@ class LiveEngine:
         deadline = time.perf_counter() + self.budget
         messages = self._initial_messages(plan, history)
         ledger = FactLedger()
-        retrieved: dict[str, list] = {}
+        retrieved: list = []
         bad_args = 0
         # 泛化 R3：模型决定"在这个范围内怎么取事实"，但**范围本身**由 Plan 決定。
         policy = PlanToolPolicy(plan)
@@ -188,6 +189,17 @@ class LiveEngine:
                 if scope_meta["status"] == "filled":
                     trace.step("tool_scope_normalized", scope_meta)
 
+                # 泛化 R4：把 canonical Plan 的**结构化检索范围**（as_of / 门店 /
+                # historical / 时间窗 / 年份）注入 search_kb。模型看不到这些字段
+                # （不在工具 schema 里），也无法漂移——就算它硬塞同名参数，这里
+                # 也会被 Plan 的值覆盖。这修掉了"模型换个说法（旧版/当时）就能
+                # 越过 Plan 的 as_of 把已废止版本捞回来"的历史缺陷。
+                if name == "search_kb":
+                    scope = self._knowledge_scope(plan)
+                    effective = dict(effective)
+                    effective.update(scope)
+                    trace.step("retrieval_scope", scope)
+
                 started = time.perf_counter()
                 result = _as_json_object(self.run_tool(name, effective))
                 trace.step("tool", {"tool": name, "params": effective,
@@ -195,7 +207,8 @@ class LiveEngine:
 
                 source = KNOWLEDGE_SOURCE if name == "search_kb" else DATA_SOURCE
                 if name == "search_kb":
-                    retrieved[json.dumps(effective, ensure_ascii=False)] = result.get("results", [])
+                    retrieved.append(result.get("results", []))
+                    self._trace_knowledge(result, trace)
                 # receipt 记录的是**实际执行的 params**（proposed 只进 trace 供调试）。
                 receipt = ledger.add(name, effective, result, source=source)
                 trace.step("tool_receipt_created", receipt.trace_detail())
@@ -266,6 +279,47 @@ class LiveEngine:
         messages.append({"role": "user", "content": question})
         return messages
 
+    # -- 结构化检索范围（泛化 R4） ----------------------------------------------
+
+    def _knowledge_scope(self, plan: Plan) -> dict:
+        """从 canonical Plan 抽出 **结构化检索范围** 交给 search_kb。
+
+        这些字段模型看不到（不在工具 schema 里），由应用注入；它们是
+        "版本与时点"的唯一权威——检索不再依赖模型 query 里带什么魔法关键词。
+        """
+        return {
+            "as_of": plan.as_of.isoformat() if plan.as_of else None,
+            "store_id": plan.store_id,
+            "historical": bool(plan.slots.get("historical")),
+            "year": plan.year,
+            "window": list(plan.window) if plan.window else None,
+            "numeric": bool(plan.needs_data),
+        }
+
+    def _trace_knowledge(self, result: dict, trace) -> None:
+        """把检索结果的**溯源与清洗**写进 trace：哪篇、哪个 chunk、什么权威、剥了几条。"""
+        filtered = result.get("filtered") if isinstance(result, dict) else None
+        if filtered:
+            trace.step("retrieval_filtered", {"filtered": filtered})
+        items = result.get("results") if isinstance(result, dict) else None
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            trace.step("source_authority", {
+                "doc_id": item.get("doc_id"),
+                "authority": item.get("authority"),
+                "numeric_authority": item.get("numeric_authority"),
+                "status": item.get("status"),
+                "effective_from": item.get("effective_from"),
+            })
+            if item.get("dropped_instructions"):
+                trace.step("knowledge_sanitized", {
+                    "doc_id": item.get("doc_id"),
+                    "chunk_id": item.get("chunk_id"),
+                    "dropped_instructions": item.get("dropped_instructions"),
+                    "dropped": item.get("source_dropped"),
+                })
+
     # -- Finalisation Authority -------------------------------------------------
 
     def _finalise(
@@ -278,7 +332,7 @@ class LiveEngine:
         它不会再调用 ``Answerer.answer()``——live 模式下没有第二套作答器。
         """
         text, doc_ids = _split_doc_marks(reply.content)
-        citations = self._citations(plan, doc_ids)
+        citations = build_citations(plan, doc_ids, ledger, self.answerer.facts, trace)
         citations = _clear_citations_if_no_explanation(text, citations, trace)
         allowed = self._allowed_numbers(plan, ledger, citations)
         bad = _unsupported_numbers(text, allowed)
@@ -293,7 +347,7 @@ class LiveEngine:
             if repaired is None:
                 return self._refusal(bad, ledger)
             text, doc_ids = _split_doc_marks(repaired)
-            citations = self._citations(plan, doc_ids)
+            citations = build_citations(plan, doc_ids, ledger, self.answerer.facts, trace)
             citations = _clear_citations_if_no_explanation(text, citations, trace)
             allowed = self._allowed_numbers(plan, ledger, citations)
             bad = _unsupported_numbers(text, allowed)
@@ -368,12 +422,14 @@ class LiveEngine:
         )
 
     def _citations(self, plan: Plan, doc_ids: list[str]) -> list[dict]:
-        """引用由代码生成：从模型点名的文档里挑最相关的一句原文，保证逐字可核对。
+        """给定候选 doc 编号 → 逐年过滤后的引用（**D28 的年份过滤助手**）。
 
-        D28：按**问题问的年份**过滤——问 2026 的 618 就不引 2025 的方案。
-        注意不按"归档"过滤（归档 ≠ 废止，mock 管线对归档文档照答不误）；
-        也不按 estimates_only 过滤（C07 合法引用的例会纪要就是估算类文档，
-        "why"问题引用它是对的，估算只是不能进数字）。
+        注意：这是"给我一批编号、按年份筛一遍"的**纯过滤助手**，只回答
+        "问 2026 的 618 就不引 2025 的方案"。它不做检索溯源校验。
+
+        live 流水线**不再走这里**——正式路径是 `kbqa.citations.build_citations`，
+        它额外要求"这条引用必须来自本轮真的检索到的 chunk"（R4 引用溯源）。
+        本方法保留是给 D28 的单元契约（直接调用、无检索上下文）用。
         """
         citations = []
         year = _question_year(plan)
@@ -454,17 +510,38 @@ def _fmt(value: float) -> str:
     return "%g" % value
 
 
-def _facts_digest(ledger: FactLedger, limit: int = 1200) -> str:
-    """repair 时给模型看的"已有事实"摘要：只列数据 receipt 的参数与结果。"""
+def _facts_digest(ledger: FactLedger, limit: int = 1600) -> str:
+    """repair 时给模型看的"已有事实"摘要。
+
+    * **数据 receipt**：参数 + canonical 结果（数字的权威）。
+    * **知识 receipt**：只给**安全文本**与 doc/chunk 编号——这是**唯一允许被引用**
+      的来源（R4 引用溯源：模型只能从本轮真的检索到的片段里引用）。原始来源
+      （`source_text`）与它剥掉的指令句绝不进这里，否则 repair 上下文就成了
+      攻击句的旁路。
+    """
     lines: list[str] = []
     for receipt in ledger.data_receipts():
         blob = json.dumps(receipt.result, ensure_ascii=False, default=str)
         if len(blob) > 400:
             blob = blob[:400] + "…"
-        lines.append("- %s %s → %s" % (receipt.receipt_id, receipt.tool,
-                                       json.dumps(receipt.params, ensure_ascii=False)))
-        lines.append("  %s" % blob)
-    return "\n".join(lines)[:limit] or "（这次没有任何数据库查询结果）"
+        lines.append("- %s %s %s → %s" % (receipt.receipt_id, receipt.tool,
+                                          json.dumps(receipt.params, ensure_ascii=False), blob))
+    sources = []
+    for receipt in ledger.knowledge_receipts():
+        result = receipt.result if isinstance(receipt.result, dict) else {}
+        for item in result.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            text = (item.get("text") or "").strip().replace("\n", " ")
+            if len(text) > 140:
+                text = text[:140] + "…"
+            sources.append("  - [%s] %s：%s" % (
+                item.get("doc_id"), item.get("chunk_id"), text))
+    body = "\n".join(lines) if lines else "（这次没有任何数据库查询结果）"
+    if sources:
+        body += ("\n本轮检索到的文档片段（**只有这些可以作为引用来源**，"
+                 "引用时在句末写它的编号）：\n" + "\n".join(sources))
+    return body[:limit]
 
 
 def _projection_stats(evidence: list[dict]) -> dict:

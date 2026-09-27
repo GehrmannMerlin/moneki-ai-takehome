@@ -43,6 +43,10 @@ MODEL_RESULT_BYTES = 32 * 1024
 MAX_EVIDENCE_RESULT_BYTES = 4096
 MAX_EVIDENCE_NUMBERS = 60
 
+#: 知识 receipt 里**只给应用自己看**的字段：原始来源与它剥掉的指令句。
+#: 进模型上下文的那一份必须把它们摘掉——这正是"原始来源 → 安全投影"的边界。
+_KNOWLEDGE_INTERNAL_KEYS = frozenset({"source_text", "source_dropped"})
+
 
 @dataclass(frozen=True)
 class ToolReceipt:
@@ -122,10 +126,17 @@ class FactLedger:
 
     def model_projection(self, receipt: ToolReceipt,
                          max_bytes: int = MODEL_RESULT_BYTES) -> str:
-        """给 DeepSeek 的工具内容：完整事实（必要时结构化收缩），绝不用 stub。"""
-        obj = _shrink(copy.deepcopy(receipt.result), max_bytes, None)
-        if obj is None:                                       # pragma: no cover - 极端兜底
-            obj = receipt.result
+        """给 DeepSeek 的工具内容：完整事实（必要时结构化收缩），绝不用 stub。
+
+        知识 receipt 走**安全视图**：原始来源（`source_text`）与它剥掉的指令句
+        （`source_dropped`）一律不进模型上下文。数据 receipt 原样结构化收缩。
+        """
+        if receipt.source == KNOWLEDGE_SOURCE:
+            obj = _knowledge_model_view(receipt.result)
+        else:
+            obj = _shrink(copy.deepcopy(receipt.result), max_bytes, None)
+            if obj is None:                                   # pragma: no cover - 极端兜底
+                obj = receipt.result
         return json.dumps(obj, ensure_ascii=False, default=str)
 
     def evidence_projection(self, receipt: ToolReceipt, answer_numbers: list[float],
@@ -151,6 +162,26 @@ class FactLedger:
 
 
 # =========================================================================== 投影实现
+
+
+def _knowledge_model_view(result: Any) -> Any:
+    """知识 receipt → 模型安全视图：逐条结果摘掉原始来源与剥掉的指令句。
+
+    纯变换、深拷贝：canonical receipt 一字不动。`results` 之外的键（例如
+    `scope`）原样保留，供模型理解这次检索的范围。
+    """
+    if not isinstance(result, dict):
+        return copy.deepcopy(result)
+    out = {key: copy.deepcopy(value) for key, value in result.items() if key != "results"}
+    results = []
+    for item in result.get("results") or []:
+        if isinstance(item, dict):
+            results.append({key: copy.deepcopy(value) for key, value in item.items()
+                            if key not in _KNOWLEDGE_INTERNAL_KEYS})
+        else:
+            results.append(copy.deepcopy(item))
+    out["results"] = results
+    return out
 
 
 def _is_number(value) -> bool:

@@ -46,6 +46,32 @@ _MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
 #: KB-001 §5.2：周报、会议纪要、活动复盘里的数字是人工估算，不能当答案。
 ESTIMATE_TYPES = {"周报", "会议纪要", "复盘", "活动复盘"}
 
+#: 正文里的版本状态（R4 泛化）：`.txt`/`.html` 导出件没有 YAML 头，
+#: 「状态：已废止」这类信息只能从正文认。只认**显式字段**（`状态：X`）或
+#: 「本版本已废止」这种整句声明，避免把「营业状态」之类的普通词当成版本状态。
+_STATUS_PATTERNS = (
+    re.compile(r"(?:版本)?状态\s*[：:]\s*(现行|有效|生效|已废止|废止|作废|失效|停用|归档|草稿)"),
+    re.compile(r"本(?:版本|版|文件|通知|方案)已(?:废止|作废|失效)"),
+)
+#: 正文里的取代关系（R4 泛化）：必须点名被取代它的 **KB 编号**，
+#: 「口径见 KB-001」这类引用不会被误判成取代关系。
+_SUPERSEDED_PATTERNS = (
+    re.compile(r"现行版本见\s*(KB-\d{3})"),
+    re.compile(r"已(?:被|由)\s*(KB-\d{3})\s*取代"),
+    re.compile(r"superseded_by\s*[：:]\s*(KB-\d{3})", re.I),
+)
+#: 正文里显式的适用范围（R4 泛化）：`适用门店：S91、S92`。
+#: 这是**硬范围**——正文里偶然提到某个门店编号不算（KB-001 正文就举了 s01 当例子）。
+_DECLARED_STORES = re.compile(r"适用(?:门店|范围|店铺)\s*[：:]\s*([^\n]+)")
+
+#: 状态词的归一口径：正文里怎么写，都收敛到这几个值。
+_STATUS_CANON = {
+    "现行": "现行", "有效": "现行", "生效": "现行",
+    "已废止": "已废止", "废止": "已废止", "作废": "已废止",
+    "失效": "已废止", "停用": "已废止",
+    "归档": "归档", "草稿": "草稿",
+}
+
 #: 元数据来源，记进 `meta_source` 供 trace 与调试用（B6 的三级降级链）。
 SOURCE_FRONTMATTER = "frontmatter"
 SOURCE_BODY = "body_inferred"
@@ -182,6 +208,46 @@ def effective_from_body(text: str) -> Optional[date]:
     return None
 
 
+def status_from_body(text: str) -> Optional[str]:
+    """没有 YAML 头时，从正文里认版本状态（R4 的降级链第二级）。
+
+    只认「状态：已废止」这种显式字段，或「本版本已废止」这类整句声明；
+    正文里出现「营业状态正常」这种词不会被当成版本状态。
+    """
+    for pattern in _STATUS_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        if match.lastindex:
+            word = _STATUS_CANON.get(match.group(1))
+            if word:
+                return word
+        return "已废止"                                   # 「本版本已废止」类声明
+    return None
+
+
+def superseded_from_body(text: str) -> Optional[str]:
+    """没有 YAML 头时，从正文里认「被哪一版取代」。必须点名 KB 编号。"""
+    for pattern in _SUPERSEDED_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def declared_stores_from_body(text: str) -> Optional[list[str]]:
+    """正文里的「适用门店：S91、S92」。返回归一后的编号列表；没有则 None。
+
+    **只有显式字段才算硬范围**：正文里偶然出现 `S91` 只是线索，
+    不能当作过滤条件（否则 KB-001 正文里举例的 `s01` 会把整篇挡掉）。
+    """
+    match = _DECLARED_STORES.search(text)
+    if not match:
+        return None
+    codes = _sorted_unique(_STORE_CODE.findall(match.group(1)))
+    return codes or None
+
+
 def _title_from_body(text: str, fallback: str) -> str:
     for line in text.splitlines():
         stripped = line.strip().lstrip("#").strip()
@@ -260,19 +326,42 @@ def load_document(path: Path) -> Optional[Document]:
         return None
 
     declared = meta.get("stores")
-    stores = declared or _sorted_unique(_STORE_CODE.findall(text))
+    body_stores = declared_stores_from_body(text)
+    if declared:
+        stores, stores_explicit = declared, True
+    elif body_stores:
+        stores, stores_explicit = body_stores, True
+    else:
+        # 正文里出现的门店编号只是线索，不是硬范围。
+        stores, stores_explicit = _sorted_unique(_STORE_CODE.findall(text)), False
     doc_type = str(meta.get("type") or "").strip()
     if not doc_type:
         doc_type = _guess_type(path.name, text)
 
-    # 元数据降级链（B6）：frontmatter → 正文推断 → 默认值。每一步都记 meta_source。
-    status = str(meta.get("status") or "").strip()
-    effective = _as_date(meta.get("effective_from"))
-    if status or effective:
+    # 元数据降级链（B6）：frontmatter → 正文推断 → 默认值。
+    # R4 泛化：`.txt`/`.html` 导出件把状态 / 取代关系 / 生效日期写在正文里，
+    # 这里逐字段补齐——**frontmatter 有值就绝不被正文覆盖**（KB-002/010/012
+    # 正文里的「本版本已废止」只是补充说明，权威仍在 YAML 头）。
+    fm_status = str(meta.get("status") or "").strip()
+    fm_effective = _as_date(meta.get("effective_from"))
+    fm_superseded = str(meta.get("superseded_by") or "").strip() or None
+
+    body_status = body_effective = body_superseded = None
+    if not (fm_status and fm_effective and fm_superseded):
+        body_status = status_from_body(text)
+        body_effective = effective_from_body(text)
+        body_superseded = superseded_from_body(text)
+
+    status = fm_status or body_status or ""
+    effective = fm_effective or body_effective
+    superseded_by = fm_superseded or body_superseded
+
+    if fm_status or fm_effective or fm_superseded:
         meta_source = SOURCE_FRONTMATTER
+    elif body_status or body_effective or body_superseded:
+        meta_source = SOURCE_BODY
     else:
-        effective = effective_from_body(text)
-        meta_source = SOURCE_BODY if effective else SOURCE_DEFAULT
+        meta_source = SOURCE_DEFAULT
     if not status:
         # 提不到状态的当作"自始有效"的现行文档。
         # 不能因为"无法确定时效"就整篇降权/过滤——KB-062（GBK 通知，无 frontmatter）
@@ -288,9 +377,9 @@ def load_document(path: Path) -> Optional[Document]:
         doc_type=doc_type,
         status=status,
         effective_from=effective,
-        superseded_by=(str(meta.get("superseded_by")).strip() if meta.get("superseded_by") else None),
+        superseded_by=superseded_by,
         stores=[s.upper() for s in stores],
-        stores_explicit=bool(declared),
+        stores_explicit=stores_explicit,
         updated_at=_as_date(meta.get("updated_at")),
         warnings=warnings,
         meta_source=meta_source,
