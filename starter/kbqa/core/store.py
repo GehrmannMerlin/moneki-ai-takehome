@@ -31,12 +31,15 @@ from typing import Any, Optional
 
 #: 一个会话保留最近多少轮。够了解追问，也不至于让槽位被很久以前的话污染。
 MAX_TURNS = 12
+MAX_SESSIONS = 500
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     slots      TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    epoch      TEXT,
+    access_seq INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS turns (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +64,12 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, name: str, definition: str) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+    if name not in columns:
+        conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, definition))
+
+
 class SessionStore:
     """按 `session_id` 分桶的对话历史（修 D14）。
 
@@ -69,8 +78,10 @@ class SessionStore:
     """
 
     def __init__(self, db_path: Optional[Path] = None,
-                 max_turns: int = MAX_TURNS) -> None:
+                 max_turns: int = MAX_TURNS,
+                 max_sessions: int = MAX_SESSIONS) -> None:
         self.max_turns = max_turns
+        self.max_sessions = max_sessions
         self._lock = threading.Lock()
         self._local = threading.local()
         self.db_path = Path(db_path) if db_path else None
@@ -80,10 +91,14 @@ class SessionStore:
             self._memory = sqlite3.connect(":memory:", check_same_thread=False)
             self._memory.row_factory = sqlite3.Row
             self._memory.executescript(_SCHEMA)
+            _ensure_column(self._memory, "sessions", "epoch", "TEXT")
+            _ensure_column(self._memory, "sessions", "access_seq", "INTEGER DEFAULT 0")
         else:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as conn:
                 conn.executescript(_SCHEMA)
+                _ensure_column(conn, "sessions", "epoch", "TEXT")
+                _ensure_column(conn, "sessions", "access_seq", "INTEGER DEFAULT 0")
 
     def _connect(self) -> sqlite3.Connection:
         if self.db_path is None:
@@ -125,23 +140,40 @@ class SessionStore:
         return turns
 
     def append(self, session_id: Optional[str], turn: dict) -> None:
+        self.append_with_state(session_id, turn, None)
+
+    def append_with_state(self, session_id: Optional[str], turn: dict, state=None) -> None:
+        """Atomically persist a turn, optional semantic state, and retention."""
         if not session_id:
             return
         conn = self._connect()
         with self._lock:
-            conn.execute(
-                "INSERT INTO turns (session_id, question, answer, answer_type, slots, created_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (
-                    str(session_id),
-                    turn.get("question") or "",
-                    turn.get("answer") or "",
-                    turn.get("answer_type") or "",
-                    json.dumps(turn.get("slots") or {}, ensure_ascii=False),
-                    _now(),
-                ),
-            )
-            conn.commit()
+            try:
+                conn.execute("BEGIN")
+                sid = str(session_id)
+                if state is not None:
+                    payload = state.to_dict() if hasattr(state, "to_dict") else dict(state)
+                    self._upsert_session(conn, sid, payload, payload.get("epoch"))
+                else:
+                    self._touch_session(conn, sid)
+                conn.execute(
+                    "INSERT INTO turns (session_id, question, answer, answer_type, slots, created_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (
+                        sid,
+                        turn.get("question") or "",
+                        turn.get("answer") or "",
+                        turn.get("answer_type") or "",
+                        json.dumps(turn.get("slots") or {}, ensure_ascii=False),
+                        _now(),
+                    ),
+                )
+                self._prune_turns(conn, sid)
+                self._evict_lru(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def slots(self, session_id: Optional[str]) -> dict:
         """这个会话上一次解析出来的槽位（追问继承的起点）。"""
@@ -164,13 +196,93 @@ class SessionStore:
             return
         conn = self._connect()
         with self._lock:
-            conn.execute(
-                "INSERT INTO sessions (session_id, slots, updated_at) VALUES (?,?,?)"
-                " ON CONFLICT(session_id) DO UPDATE SET slots = excluded.slots,"
-                " updated_at = excluded.updated_at",
-                (str(session_id), json.dumps(slots or {}, ensure_ascii=False), _now()),
-            )
+            self._upsert_session(conn, str(session_id), slots or {}, None)
+            self._evict_lru(conn)
             conn.commit()
+
+    def load_state(self, session_id: Optional[str], epoch: str = ""):
+        """Load normalized state; a mismatched epoch returns an empty state."""
+        from ..conversation import ConversationState
+
+        if not session_id:
+            return ConversationState.empty(epoch)
+        conn = self._connect()
+        with self._lock:
+            row = conn.execute(
+                "SELECT slots, epoch FROM sessions WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            if row:
+                self._touch_session(conn, str(session_id))
+                conn.commit()
+        if not row or not row["slots"]:
+            return ConversationState.empty(epoch)
+        try:
+            payload = json.loads(row["slots"])
+        except (TypeError, ValueError):
+            return ConversationState.empty(epoch)
+        stored_epoch = str(row["epoch"] or payload.get("epoch") or "")
+        # Legacy `save_slots` rows have no epoch and cannot be trusted against
+        # a live dataset/KB context.  Treat them as stale when the caller has
+        # an active epoch instead of silently importing old entities.
+        if epoch and stored_epoch != epoch:
+            return ConversationState.empty(epoch, "context_epoch_changed")
+        return ConversationState.from_dict(payload, epoch=epoch or stored_epoch)
+
+    def save_state(self, session_id: Optional[str], state) -> None:
+        if not session_id:
+            return
+        payload = state.to_dict() if hasattr(state, "to_dict") else dict(state)
+        conn = self._connect()
+        with self._lock:
+            self._upsert_session(conn, str(session_id), payload, payload.get("epoch"))
+            self._evict_lru(conn)
+            conn.commit()
+
+    def _next_access_seq(self, conn: sqlite3.Connection) -> int:
+        return int(conn.execute("SELECT COALESCE(MAX(access_seq), 0) + 1 FROM sessions").fetchone()[0])
+
+    def _touch_session(self, conn: sqlite3.Connection, session_id: str) -> None:
+        seq = self._next_access_seq(conn)
+        conn.execute(
+            "INSERT INTO sessions (session_id, slots, updated_at, epoch, access_seq) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(session_id) DO UPDATE SET updated_at = excluded.updated_at,"
+            " access_seq = excluded.access_seq",
+            (session_id, None, _now(), None, seq),
+        )
+
+    def _upsert_session(self, conn: sqlite3.Connection, session_id: str,
+                        payload: dict, epoch: Optional[str]) -> None:
+        seq = self._next_access_seq(conn)
+        encoded = json.dumps(payload or {}, ensure_ascii=False)
+        conn.execute(
+            "INSERT INTO sessions (session_id, slots, updated_at, epoch, access_seq) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(session_id) DO UPDATE SET slots = excluded.slots,"
+            " updated_at = excluded.updated_at, epoch = excluded.epoch,"
+            " access_seq = excluded.access_seq",
+            (session_id, encoded, _now(), epoch, seq),
+        )
+
+    def _prune_turns(self, conn: sqlite3.Connection, session_id: str) -> None:
+        if self.max_turns <= 0:
+            conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+            return
+        conn.execute(
+            "DELETE FROM turns WHERE session_id = ? AND id NOT IN "
+            "(SELECT id FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT ?)",
+            (session_id, session_id, int(self.max_turns)),
+        )
+
+    def _evict_lru(self, conn: sqlite3.Connection) -> None:
+        limit = max(1, int(self.max_sessions))
+        rows = conn.execute(
+            "SELECT session_id FROM sessions ORDER BY access_seq DESC LIMIT -1 OFFSET ?",
+            (limit,),
+        ).fetchall()
+        for row in rows:
+            session_id = row["session_id"]
+            conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
     def clear(self, session_id: Optional[str] = None) -> None:
         conn = self._connect()
