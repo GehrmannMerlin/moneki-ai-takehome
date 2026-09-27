@@ -338,7 +338,7 @@ class Planner:
             or asks_payment
             or E.has_any(text, E.SALES_RANK_WORDS)
             or (asks_business and plan.slots.get("time_scoped"))
-            or (plan.continuation and (
+            or (plan.continuation and not inherited.get("topic_shift") and (
                 plan.store_id or plan.product_id or inherited.get("window")
                 or operator in ("actual", "dimension_shift", "reason", "comparison")
             ))

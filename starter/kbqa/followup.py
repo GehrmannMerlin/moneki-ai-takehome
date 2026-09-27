@@ -135,6 +135,15 @@ class FollowUps:
             "topic_kind": state.topic_kind,
             "source_anchors": list(state.source_anchors),
         }
+        topic_shift = bool(re.search(r"(供应商|赔偿|赔了|断供|停售|事故|通知)", question))
+        if topic_shift:
+            # Keep the entity/topic anchor for the explanation query, but do not
+            # turn an event follow-up into a data query for the old time range.
+            inherited["window"] = None
+            inherited["compare_window"] = None
+            inherited["as_of"] = None
+            inherited["historical"] = False
+            inherited["topic_shift"] = True
         ambiguous = (
             not store and not product and not metric
             and not parse_time(question, self.today).explicit
