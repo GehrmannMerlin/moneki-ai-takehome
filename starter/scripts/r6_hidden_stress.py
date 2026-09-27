@@ -7,11 +7,19 @@ the generated SQLite source directly.
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import re
+import socket
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import urllib.error
+import urllib.request
 
 
 POS_SCHEMA = """
@@ -69,6 +77,128 @@ class KBVariant:
     attack_source: Path
     raw_attack: str
     safe_fact: str
+
+
+@dataclass(frozen=True)
+class BuildSnapshot:
+    data: DataVariant
+    kb: KBVariant
+    var_dir: Path
+    env: dict[str, str]
+    manifest: dict[str, Any]
+    rebuild_output: str
+
+
+STARTER = Path(__file__).resolve().parents[1]
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _variant_env(data: DataVariant, kb: KBVariant, var_dir: Path) -> dict[str, str]:
+    if data.root.resolve() != kb.root.resolve():
+        raise ValueError("data and KB variants must share a root")
+    env = {str(key): str(value) for key, value in os.environ.items()}
+    env.update({
+        "DATA_DIR": str(data.data_dir),
+        "KB_DIR": str(kb.kb_dir),
+        "VAR_DIR": str(var_dir),
+        "PYTHONIOENCODING": "utf-8",
+    })
+    for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+        env.pop(key, None)
+    return env
+
+
+def rebuild_variant(data: DataVariant, kb: KBVariant) -> BuildSnapshot:
+    """Run the repository rebuild command against only the generated inputs."""
+    var_dir = data.root / "var"
+    env = _variant_env(data, kb, var_dir)
+    proc = subprocess.run(
+        [sys.executable, "-m", "kbqa.rebuild"],
+        cwd=str(STARTER),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("variant rebuild failed:\n%s\n%s" % (proc.stdout, proc.stderr))
+    manifest_path = var_dir / "build_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return BuildSnapshot(data, kb, var_dir, env, manifest, proc.stdout)
+
+
+class ServiceHandle:
+    """Fresh uvicorn process with bounded HTTP calls and guaranteed shutdown."""
+
+    def __init__(self, env: dict[str, str], port: int) -> None:
+        self.env = dict(env)
+        self.port = port
+        self.base_url = "http://127.0.0.1:%d" % port
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "kbqa.server:app",
+             "--host", "127.0.0.1", "--port", str(port)],
+            cwd=str(STARTER),
+            env=self.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def __enter__(self) -> "ServiceHandle":
+        deadline = time.time() + 90
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError("variant service exited with code %s" % self.proc.returncode)
+            try:
+                self.get("/api/health")
+                return self
+            except Exception as exc:  # noqa: BLE001 - startup retry boundary
+                last_error = exc
+                time.sleep(0.25)
+        raise RuntimeError("variant service did not become healthy: %s" % last_error)
+
+    def __exit__(self, *_exc: object) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict:
+        data = None
+        headers = {}
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        request = urllib.request.Request(
+            self.base_url + path, data=data, headers=headers, method=method
+        )
+        try:
+            with self._opener.open(request, timeout=90) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError("HTTP %s %s: %s" % (exc.code, path, body)) from exc
+
+    def get(self, path: str) -> dict:
+        return self._request("GET", path)
+
+    def post(self, path: str, payload: dict[str, Any]) -> dict:
+        return self._request("POST", path, payload)
+
+    def trace(self, trace_id: str) -> dict:
+        from urllib.parse import quote
+
+        return self.get("/api/trace/" + quote(trace_id, safe=""))
 
 
 def _generated_ids(seed: int) -> tuple[str, str]:

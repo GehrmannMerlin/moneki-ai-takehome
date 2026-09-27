@@ -131,3 +131,35 @@ def test_kb_families_are_seeded_and_preserve_injection_metadata(tmp_path):
     assert injection.raw_attack
     assert injection.safe_fact
     assert injection.raw_attack in injection.attack_source.read_text(encoding="utf-8")
+
+
+def test_new_document_reaches_rebuilt_http_retrieve_chat_and_trace(tmp_path):
+    root = tmp_path / "e2e"
+    data = r6.make_data_variant(root, seed=9161, family="values")
+    kb = r6.make_kb_variant(root, seed=9161, family="edit_add")
+
+    snapshot = r6.rebuild_variant(data, kb)
+    with r6.ServiceHandle(snapshot.env, port=r6.free_port()) as service:
+        health = service.get("/api/health")
+        assert health["kb_docs"] == 2
+        assert health["index_key"]
+
+        retrieved = service.post(
+            "/api/retrieve",
+            {"query": "配送打包费", "top_k": 5},
+        )
+        assert any(item["doc_id"] == kb.added_doc_id for item in retrieved["results"])
+
+        answer = service.post(
+            "/api/chat",
+            {"session_id": "r6-new-doc", "question": "这份新通知的配送打包费是多少？"},
+        )
+        assert kb.expected_fact.split("为 ", 1)[1].rstrip("。") in answer["answer"]
+        assert answer["answer_type"] == "doc"
+        assert any(item["doc_id"] == kb.added_doc_id for item in answer["citations"])
+
+        trace = service.trace(answer["trace_id"])
+        names = [step.get("step") for step in trace.get("steps", [])]
+        assert "plan" in names
+        assert "search" in names
+        assert "response" in names
