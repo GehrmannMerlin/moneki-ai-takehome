@@ -340,7 +340,9 @@ class LiveEngine:
         它不会再调用 ``Answerer.answer()``——live 模式下没有第二套作答器。
         """
         text, doc_ids = _split_doc_marks(reply.content)
-        citations = build_citations(plan, doc_ids, ledger, self.answerer.facts, trace)
+        citations = build_citations(
+            plan, doc_ids, ledger, self.answerer.facts, trace, claim_text=text
+        )
         citations = _clear_citations_if_no_explanation(text, citations, trace)
         allowed = self._allowed_numbers(plan, ledger, citations)
         bad = _unsupported_numbers(text, allowed)
@@ -355,7 +357,9 @@ class LiveEngine:
             if repaired is None:
                 return self._refusal(bad, ledger)
             text, doc_ids = _split_doc_marks(repaired)
-            citations = build_citations(plan, doc_ids, ledger, self.answerer.facts, trace)
+            citations = build_citations(
+                plan, doc_ids, ledger, self.answerer.facts, trace, claim_text=text
+            )
             citations = _clear_citations_if_no_explanation(text, citations, trace)
             allowed = self._allowed_numbers(plan, ledger, citations)
             bad = _unsupported_numbers(text, allowed)

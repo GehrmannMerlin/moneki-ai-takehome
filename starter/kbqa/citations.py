@@ -90,11 +90,18 @@ def select_quote(chunk_text: str, query: str) -> Optional[str]:
     return _clamp_normalized(candidates[0][2])
 
 
-def _pick_chunk(items: list[dict], query: str) -> Optional[dict]:
-    """一条 doc 检索到多个 chunk 时，挑与问题最相关的那一个（本轮真命中的）。"""
+def _pick_chunk(items: list[dict], query: str, claim_text: str = "") -> Optional[dict]:
+    """挑与问题及回答 claim 最相关的本轮命中 chunk。
+
+    A broad question can retrieve a document whose decisive fact lives in a
+    different chunk from the policy heading.  Once the model has produced a
+    claim, its meaningful terms are a second, still-local ranking signal; using
+    them keeps the citation and final numeric validation bound to the same
+    source span without re-opening the whole document.
+    """
     if not items:
         return None
-    query_terms = set(content_tokens(query or ""))
+    query_terms = set(content_tokens("%s %s" % (query or "", claim_text or "")))
 
     def score(item: dict):
         text = item.get("source_text") or item.get("text") or ""
@@ -104,7 +111,14 @@ def _pick_chunk(items: list[dict], query: str) -> Optional[dict]:
     return sorted(items, key=score)[0]
 
 
-def build_citations(plan, doc_ids: list[str], ledger, facts, trace) -> list[dict]:
+def build_citations(
+    plan,
+    doc_ids: list[str],
+    ledger,
+    facts,
+    trace,
+    claim_text: str = "",
+) -> list[dict]:
     """把模型点名的 doc 编号，收敛成"来自本轮检索凭证"的引用列表。
 
     `ledger` 是 :class:`kbqa.ledger.FactLedger`；只有它的 **knowledge receipts**
@@ -113,6 +127,7 @@ def build_citations(plan, doc_ids: list[str], ledger, facts, trace) -> list[dict
     """
     index = facts.index
     query = plan.search_query or plan.standalone or plan.question or ""
+    citation_query = "%s %s" % (query, claim_text or "")
 
     # ① "本轮检索到过哪些 chunk"——来自 Knowledge Receipt。
     receipts = ledger.knowledge_receipts() if hasattr(ledger, "knowledge_receipts") else []
@@ -136,12 +151,15 @@ def build_citations(plan, doc_ids: list[str], ledger, facts, trace) -> list[dict
             trace.step("citation_rejected",
                        {"doc_id": doc_id, "reason": "year_mismatch", "year": year})
             continue
-        chunk = _pick_chunk(retrieved[doc_id], query)
+        chunk = _pick_chunk(retrieved[doc_id], query, claim_text)
         if chunk is None:
             trace.step("citation_rejected", {"doc_id": doc_id, "reason": "no_chunk"})
             continue
         # quote 只能取自**这个本轮命中的 chunk 原文**。
-        quote = select_quote(chunk.get("source_text") or chunk.get("text") or "", query)
+        quote = select_quote(
+            chunk.get("source_text") or chunk.get("text") or "",
+            citation_query,
+        )
         if not quote:
             trace.step("citation_rejected",
                        {"doc_id": doc_id, "chunk_id": chunk.get("chunk_id"),
