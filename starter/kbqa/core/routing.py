@@ -1,4 +1,4 @@
-"""区间闸与意图复核：把 `core.intent` 的判定落到 `Plan` 上。
+"""区间闸：判断问题里的时间是不是落在数据区间之外。
 
 ## 区间闸（与 metrics API 行为相反）
 
@@ -8,27 +8,21 @@
 | 区间**与数据区间无交集** | 返回 0 | **拒答**，如实说数据范围，**不编数字** |
 
 F01「9 月的营业额是多少」考的就是后者：`answer_type` 必须是 `refusal`，
-且 `numbers_none_beyond_question` 不许出现问句里没有的数字。
+且 `numbers_none_over_question` 不许出现问句里没有的数字。
 反过来 M05 考的是前者。两者不矛盾，是同一份数据在两种接口下的不同约定。
 
-## 意图复核
+## 这一层现在的归属（泛化 R3）
 
-starter 的 `planner` 有个结构性偏差：它把时间解析的结果当作路由依据，
-而 `timeparse` 会把"多久""现在"解析成时间窗。于是
-
-* 「外卖订单多久内可以申请退款」→ `data`，窗口 `2026-05-01..08-31`
-* 「Super Souper 现在周五晚上营业到几点」→ `refusal`，窗口 `2026-09-01..09-01`
-
-两条都不该那样判。这一层用 `core.intent` 的独立判定覆盖 planner 的 `intent`
-（保留它解析出来的实体与窗口——那部分是对的）。
+`off_range()` / `explicit_months()` 现在只作为 **Planner 内部的纯函数**被调用
+（`planner._period_gate`）。原先与之相邻的 `apply_intent()`——在 Planner 返回之后
+再跑一次意图分类去改写 `intent`/`kind`——已经删除：它构成了第二套规划权威，
+现在那份判定收进了 `planner._reconcile_intent`。
 """
 
 from __future__ import annotations
 
 import re
 from typing import Optional
-
-from .intent import Intent
 
 #: 显式的年月日/月/日写法，用来判断"问的是不是区间外的时间"。
 _MONTH = re.compile(r"(?:20(\d{2})\s*年\s*)?(\d{1,2})\s*月")
@@ -90,91 +84,3 @@ def off_range(question: str, plan, data_period: dict) -> Optional[str]:
     return "问句里的时间（%s）与数据区间 %s 至 %s 没有交集" % (
         months, data_period.get("start"), data_period.get("end"))
 
-
-def apply_intent(plan, intent: Intent, data_period: dict):
-    """把意图复核的结果写到 plan 上。
-
-    只覆盖 `intent` / `kind`，**保留 planner 解析出来的实体与窗口**——
-    `store_id` / `product_id` / `window` / `as_of` 那些是对的，别动。
-
-    一个要处理的例外：planner 会因为"现在"把纯文档问题判成
-    `refusal / out_of_period`（窗口 `today..today` 落在数据区间之外）。
-    那不是"问了区间外的时间"，是 planner 把"现在"误当成了时间窗，
-    所以这种情况下意图复核有权覆盖它。
-    """
-    if plan.intent == "clarify":
-        return plan
-    if plan.intent == "refusal" and plan.kind == "need_context":
-        # 追问但没有上文：这是真的没法答，意图复核不该把它掰成能回答的问题
-        return plan
-
-    planner_intent = plan.intent
-
-    # **planner 已经判定成"两期对比"（kind=compare）时，不要用意图复核去覆盖它。**
-    #
-    # 追问还原出来的 `standalone` 是拼接产物，形如
-    # `这两个月差了多少？是涨还是跌 那8月`——**句子里没有指标词**，
-    # 分类器因此判成 doc。但 planner 那边有更硬的证据：
-    # 它找到了两个时间窗、并且句子里有涨跌词，所以判了 `compare`。
-    # 指标没写就按净营业额比（planner 本来就是这么做的）。
-    #
-    # T01「这两个月的**客单价**差了多少」之所以一直没暴露这个问题，
-    # 是因为它还带着"客单价"这个指标词，分类器刚好能判对。
-    # 这是我自己加的意图复核引入的回归，靠自补题库 X08 才撞出来。
-    if plan.kind == "compare":
-        plan.slots["intent_confidence"] = intent.confidence
-        plan.slots["intent_hints"] = intent.hints
-        plan.slots["intent_recheck"] = {"planner": planner_intent,
-                                        "final": plan.intent,
-                                        "note": "planner 已判定两期对比，保留其结论"}
-        return plan
-
-    # `off_range()` 是在**意图复核之前**跑的，它拦的是"问句里确实写了区间外月份"
-    # 那一类。这里要处理的是另一半：planner 把"现在"误当成时间窗，
-    # 于是 `out_of_period` 变成拒答（"现在周五营业到几点"）。
-    #
-    # 判据：`plan.standalone` 里**有没有真的写出区间外的月份**。
-    # 有 → 是前者（已经在 off_range 拦掉了，走到这里说明没拦，那就别动）；
-    # 没有 → 是后者，意图复核有权覆盖。
-    if plan.intent == "refusal" and plan.kind == "out_of_period":
-        year = plan.as_of.year if getattr(plan, "as_of", None) else 2026
-        misread_as_out_of_period = not explicit_months(plan.standalone, year)
-    else:
-        misread_as_out_of_period = False
-
-    if intent.kind == "doc":
-        plan.intent = "doc"
-        plan.kind = "doc" if (misread_as_out_of_period
-                              or plan.kind != "doc") else plan.kind
-        if misread_as_out_of_period:
-            plan.slots["window_ignored"] = True
-    elif intent.kind == "hybrid":
-        if misread_as_out_of_period:
-            plan.intent = "hybrid"
-            plan.kind = "price" if intent.price_now else "doc"
-        elif intent.price_now and plan.kind in ("summary", "doc"):
-            plan.intent = "hybrid"
-            plan.kind = "price"
-        else:
-            # 「…为什么比别的周低这么多」这类：数字要查库、原因要查文档。
-            # `Answerer.answer()` 的分派是"先看 kind，再看 intent"，
-            # 而 `_merge_doc_side` 的触发条件是
-            # `plan.intent == "data" and answer_type == "data"`——
-            # 所以这里**把 intent 留在 data**、只设 `two_part`，
-            # 让数据侧先答出来，再由 `_merge_doc_side` 补文档那一半并提升成 hybrid。
-            # 直接设成 hybrid 反而会走 `_answer_doc`，变成纯文档答案（H01/H05/H06 就是这么红的）。
-            plan.intent = "data"
-            plan.slots["two_part"] = True
-    elif misread_as_out_of_period:
-        # 意图复核也说是 data，但 planner 的 refusal 来自"现在"这个误判：
-        # 放行成数据问题，让槽位继承去补时间窗
-        plan.intent = "data"
-        plan.kind = "summary"
-        plan.slots["window_ignored"] = True
-
-    plan.slots["intent_confidence"] = intent.confidence
-    plan.slots["intent_hints"] = intent.hints
-    plan.slots["intent_recheck"] = {"planner": planner_intent, "final": plan.intent}
-    if intent.why:
-        plan.slots["asks_why"] = True
-    return plan

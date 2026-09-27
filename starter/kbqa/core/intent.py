@@ -1,4 +1,17 @@
-"""意图分类：规则优先，置信度不足时交给 LLM 复核。
+"""意图分类：**纯规则**的确定性判定，供 Planner 内部调用。
+
+## 这一层现在的归属（泛化 R3）
+
+`classify()` / `find_metric()` 是 **Planner 内部的纯函数**：
+`planner._reconcile_intent()` 调用它们，把"这句话是在问数字、问规定、
+还是两样都要"的判定并进 Plan。Planner 返回之后**不再有人重新分类**——
+也就是说这里不再有"第二套规划权威"。
+
+> 历史注释里曾写"`confidence < 0.6` 时 live 模式交给 LLM 复核"。
+> **那是过期的**：production 从来没有一个独立的 LLM intent reviewer，
+> 也不应该新增——那会多一次 LLM 调用、多一份不确定性，等于重新制造双 Planner。
+> 现在的整体形态是 **deterministic Planner + live composer**。
+> `confidence` 只作为 trace 里的信息保留，不触发任何额外调用。
 
 ## 这一层要解决的真正问题
 
@@ -118,7 +131,11 @@ def looks_like_duration_or_clock(text: str) -> bool:
 
 
 def classify(question: str, metric_word: Optional[str] = None) -> Intent:
-    """给一个问题定意图。规则优先；`confidence < 0.6` 时 live 模式交给 LLM 复核。"""
+    """给一个问题定意图。**规则优先、完全确定性，不调用任何模型。**
+
+    `confidence` 只是 trace 里的信息，不触发"交给 LLM 复核"这类分支
+    （那种设计等于第二套 Planner，见模块 docstring）。
+    """
     from ..entities import (
         asks_about_names,
         focus_kinds,

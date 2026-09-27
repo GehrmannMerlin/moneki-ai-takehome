@@ -9,8 +9,6 @@ from typing import Any, Optional
 from .answerer import Answerer
 from .schemas import Answer
 from .core import guard
-from .core import intent as intent_mod
-from .core import routing as routing_mod
 from .core.cleaning import build_clean_db
 from .core.datatools import DataTools
 from .core.index import load_index
@@ -227,39 +225,12 @@ class Service:
             # **必须把历史传进去**：追问解析（"那 7 月呢"）靠它补全指代，
             # 不传的话 planner 只能判"这个会话里没有上文"→ clarify，
             # 多轮类 9 分全灭。P3 第一版这里漏了 `history`，是测试逼出来的。
+            #
+            # 返回的 Plan 就是本 turn 的**唯一规划权威**（泛化 R3）：区间闸与意图复核
+            # 都已经在 Planner 内部完成，Service 不再重新分类、也不再改 Plan 的任何
+            # 规划字段。Service 只做：trace → 选引擎 → 落历史。
             plan = self.planner.plan(question, history)
             trace.step("plan", plan.as_trace(), started=started)
-
-            # ② 区间闸：解析出的时间窗与数据区间**无交集** → 拒答（不带数字）。
-            #    注意与 metrics API 相反：API 对空区间照契约返回 0，
-            #    chat 要如实说"没有数据"（F01 的 numbers_none_beyond_question）。
-            if plan.intent != "refusal":
-                gate = routing_mod.off_range(question, plan, self.data_period)
-                trace.step("period_gate", {"blocked": bool(gate), "reason": gate or ""})
-                if gate:
-                    blocked = guard.GuardResult(True, "out_of_range", gate)
-                    return Answer(answer=blocked.answer(self.data_period),
-                                  answer_type="refusal", notes=[gate])
-
-            # ③ 意图复核：starter 的 planner 把"多久""现在"当时间窗，
-            #    会把纯文档问题路由成数据汇总（doc 类 16 分全灭的根因）。
-            #
-            # **必须用 `plan.standalone`（追问还原后的问题）来分类，不能用原句。**
-            # 「那 7 月呢？」原句里既没有指标词也没有时间窗，按原句分类会判成 doc；
-            # 还原之后是「7 月 的净营业额是多少？」，才看得出是数据问题。
-            # 这个坑是 T01 的红测试逼出来的：不修的话第 2 轮会去引 KB-001。
-            #
-            # `metric_word` 只在**问句里真的出现了指标词**时才传。
-            # `plan.metric` 默认值是 `net_revenue`，无条件传等于告诉分类器
-            # "这题问的是净营业额"，于是「储值充值现在的赠送规则是什么？」
-            # 被判成 hybrid/price，答出"知识库里没有该商品的调价通知"。
-            hinted_metric = intent_mod.find_metric(plan.standalone)
-            intent = intent_mod.classify(plan.standalone, metric_word=hinted_metric)
-            trace.step("intent", {"kind": intent.kind, "confidence": intent.confidence,
-                                  "metric": intent.metric, "hints": intent.hints,
-                                  "classified_text": plan.standalone,
-                                  "planner_intent": plan.intent, "planner_kind": plan.kind})
-            plan = routing_mod.apply_intent(plan, intent, self.data_period)
 
             answer = self._run_engine(plan, trace, history)
             self.sessions.append(

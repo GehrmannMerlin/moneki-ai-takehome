@@ -250,19 +250,29 @@ class Answerer(HybridAnswers):
     # -- 入口 -------------------------------------------------------------------
 
     def answer(self, plan: Plan, trace=None) -> Answer:
+        """按 canonical Plan 分派（泛化 R3：只认 `intent`/`kind`）。
+
+        分派规则与 Plan 的数据模型一一对应，不再依赖 `slots` 里的语义 hack：
+
+        * `kind` 是 target / price / anomaly → 专门的混合处理器（这类题的数据侧与
+          文档侧绑得很紧，单独走）；
+        * `intent == "doc"` → 文档处理器；
+        * `intent` 是 data / hybrid → 取数处理器；hybrid 再补文档那一半。
+        """
         if plan.intent in ("refusal", "clarify"):
             return Answer(answer=plan.refusal or "无法回答这个问题。", answer_type=plan.intent)
         if plan.kind in ("target", "price", "anomaly"):
             return getattr(self, "_answer_%s" % plan.kind)(plan, trace)
         if plan.intent == "doc":
-            answer = self._answer_doc(plan, trace)
-            return self._merge_data_side(plan, answer, trace)
+            return self._answer_doc(plan, trace)
         answer = self._answer_data(plan, trace)
-        return self._merge_doc_side(plan, answer, trace)
+        if plan.intent == "hybrid":
+            return self._merge_doc_side(plan, answer, trace)
+        return answer
 
     def _merge_doc_side(self, plan: Plan, answer: Answer, trace=None) -> Answer:
-        """一句话里既问了数字又问了规定时，把文档那一半也答上。"""
-        if not plan.slots.get("two_part") or answer.answer_type != "data":
+        """hybrid：数字那一半答完之后，把规定/解释那一半补上。"""
+        if answer.answer_type != "data":
             return answer
         if plan.slots.get("cause_not_found"):
             # H06（cite_max=0）：`_cause_block` 已经判定没有文档能解释这段异常，
@@ -273,24 +283,6 @@ class Answerer(HybridAnswers):
             return answer
         answer.answer = answer.answer + "\n" + body
         answer.citations = citations
-        answer.answer_type = "hybrid"
-        return answer
-
-    def _merge_data_side(self, plan: Plan, answer: Answer, trace=None) -> Answer:
-        """文档问题里还夹着一个能查的数字时，把数字也给出来。"""
-        if not plan.slots.get("two_part") or answer.answer_type != "doc" or not plan.window:
-            return answer
-        evidence: list[dict] = []
-        result = self._call(
-            evidence,
-            "query_metrics",
-            start=plan.window[0],
-            end=plan.window[1],
-            store_id=plan.store_id,
-            product_id=plan.product_id,
-        )
-        answer.answer = render.describe_metrics(result, self._scope(plan), plan.metric) + "\n" + answer.answer
-        answer.data_evidence = evidence
         answer.answer_type = "hybrid"
         return answer
 

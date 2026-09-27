@@ -23,6 +23,25 @@ INTENT_KEYWORDS = {
 
 @dataclass
 class Plan:
+    """一次 turn 的**唯一规划权威**。
+
+    Planner 返回之后的 Plan 就是语义终态：`intent` / `kind` / `window` /
+    `store_id` / `product_id` / `metric` / `needs_data` / `needs_docs`
+    不再被 Service 二次改写（泛化 R3）。
+
+    `intent` 与 `needs_data` / `needs_docs` 的关系是**派生的、成对的**：
+
+    ==========  ==========  ==========
+    intent      needs_data  needs_docs
+    ==========  ==========  ==========
+    data        True        False
+    doc         False       True
+    hybrid      True        True
+    refusal     False       False
+    clarify     False       False
+    ==========  ==========  ==========
+    """
+
     question: str
     standalone: str
     search_query: str
@@ -40,6 +59,9 @@ class Plan:
     refusal: Optional[str] = None
     notes: list[str] = field(default_factory=list)
     slots: dict = field(default_factory=dict)
+    #: 每个槽位是怎么来的：explicit / inherited / default / derived / none。
+    #: 工具范围策略靠它区分"用户没提门店"(none) 与"planner 没解析出门店"。
+    provenance: dict = field(default_factory=dict)
 
     def as_trace(self) -> dict:
         return {
@@ -57,8 +79,57 @@ class Plan:
             "metric": self.metric,
             "needs_data": self.needs_data,
             "needs_docs": self.needs_docs,
+            "provenance": self.provenance,
             "refusal": self.refusal,
             "notes": self.notes,
+        }
+
+    # -- 不变量 ---------------------------------------------------------------
+
+    def validate(self) -> list[str]:
+        """返回违反不变量的地方（空列表 = 自洽）。
+
+        只检查**语义成对**的那几条；缺什么就报什么，不偷偷替你修。
+        """
+        problems: list[str] = []
+        pair = {
+            "data": (True, False),
+            "doc": (False, True),
+            "hybrid": (True, True),
+            "refusal": (False, False),
+            "clarify": (False, False),
+        }
+        if self.intent not in pair:
+            return ["intent 未知：%r" % self.intent]
+        want_data, want_docs = pair[self.intent]
+        if self.needs_data != want_data or self.needs_docs != want_docs:
+            problems.append(
+                "intent=%s 要求 needs_data=%s/needs_docs=%s，实际 %s/%s"
+                % (self.intent, want_data, want_docs, self.needs_data, self.needs_docs))
+        return problems
+
+    # -- 给 live 模型的结构化范围 ----------------------------------------------
+
+    def as_model_context(self) -> dict:
+        """发给 live 模型的**可信应用层规划**（结构化，不是自然语言）。
+
+        它表达"应用已经把问题解析成什么"，模型不该重新猜门店/商品/时间/指标。
+        """
+        return {
+            "intent": self.intent,
+            "kind": self.kind,
+            "standalone_question": self.standalone,
+            "resolved_scope": {
+                "window": list(self.window) if self.window else None,
+                "compare_window": list(self.compare_window) if self.compare_window else None,
+                "as_of": self.as_of.isoformat() if self.as_of else None,
+                "store_id": self.store_id,
+                "product_id": self.product_id,
+                "metric": self.metric,
+            },
+            "needs": {"data": self.needs_data, "documents": self.needs_docs},
+            "search_query": self.search_query,
+            "provenance": dict(self.provenance),
         }
 
 
@@ -108,6 +179,12 @@ class Planner:
         product_id, unknown_product = self.catalog.find_product(standalone)
         plan.store_id = store_id or (inherited.get("store_id") if not unknown_store else None)
         plan.product_id = product_id or (inherited.get("product_id") if not unknown_product else None)
+        #: 记录槽位来源，供 _finalize 生成 provenance。**不重新解析**，
+        #: 只记"这个值是问句里写的、还是上一轮继承的、还是压根没有"。
+        plan.slots["store_source"] = (
+            "explicit" if store_id else ("inherited" if plan.store_id else "none"))
+        plan.slots["product_source"] = (
+            "explicit" if product_id else ("inherited" if plan.product_id else "none"))
 
         if unknown_store:
             plan.intent = "refusal"
@@ -135,6 +212,14 @@ class Planner:
         self._choose_kind(plan, spec)
         self._check_period(plan, spec)
         self._build_search_query(plan, spec)
+        # 区间闸与意图复核**都收进 Planner**（泛化 R3）：返回之后，Plan 的规划字段
+        # 不再被 Service / Answerer / LiveEngine 任何一处改写，这就是"一个 turn 只有
+        # 一个规划权威"的落地方式。顺序与它们原先在 Service 里的一致，
+        # 免得改变既有问题的判定结果。
+        gated = plan.intent != "refusal" and self._period_gate(plan, question)
+        if not gated:
+            self._reconcile_intent(plan)
+        self._finalize(plan, spec, inherited)
         recent = [
             window
             for window in (inherited.get("recent_windows") or []) + [plan.window]
@@ -160,7 +245,9 @@ class Planner:
 
     def _fill_measure(self, plan: Plan, spec: TimeSpec, inherited: dict) -> None:
         text = plan.standalone
-        metric = E.find_metric(text)
+        # 指标词从"去掉被否定的排行分句"后的文本里取：出现排行词本身不代表要排行，
+        # 所以「不要按销量排名，只看 S91 7 月营业额」的 metric 是 net_revenue 而不是 qty。
+        metric = E.find_metric(E.focus_text_for_metric(text))
         plan.metric = metric or inherited.get("metric") or "net_revenue"
         plan.notes.append(
             "识别：指标=%s 门店=%s 商品=%s 时间=%s"
@@ -196,7 +283,9 @@ class Planner:
         plan.window = windows[0]
         explicit_metric = bool(plan.slots.get("metric_explicit"))
         asks_policy = E.has_any(text, E.POLICY_WORDS)
-        asks_rank = E.has_any(text, E.RANK_WORDS)
+        # 排行意图的唯一入口：出现排行词 ≠ 要排行。
+        # 「不要按销量排名」「反馈最多不代表营业额最高」都在**排除**排行解读。
+        asks_rank = E.asks_ranking(text)
         asks_payment = E.has_any(text, E.PAYMENT_WORDS)
         asks_why = E.has_any(text, E.WHY_WORDS)
         asks_target = E.has_any(text, E.TARGET_WORDS)
@@ -272,7 +361,6 @@ class Planner:
 
         plan.slots["asks_why"] = bool(asks_why or abnormal)
         plan.slots["about_names"] = E.asks_about_names(text)
-        plan.slots["two_part"] = False
         # 什么抓手都没有时（没有指标、时间、门店、商品、支付方式、排名，
         # 连一个具体数字或制度词都没有），宁可反问，也不要拿一个不相干的结果糊弄。
         plan.slots["underspecified"] = not (
@@ -308,6 +396,115 @@ class Planner:
                 start,
                 end,
             )
+
+    def _period_gate(self, plan: Plan, question: str) -> bool:
+        """问句里**显式写出**的月份与数据区间没有交集吗。
+
+        与 `_check_period()` 互补：那个用解析出的**时间窗**判，这个用问句里写出的
+        **月份**判。两者都是 Planner 的职责——泛化 R3 把原先 Service 里的第二次
+        区间判断收进来，Service 不再有第二个 planning mutation point。
+        命中返回 True（已改成区间外拒答），调用方据此跳过意图复核（与旧顺序一致）。
+        """
+        from .core import guard as guard_mod
+        from .core import routing as routing_mod
+
+        reason = routing_mod.off_range(question, plan, self.data_period)
+        if not reason:
+            return False
+        plan.intent, plan.kind = "refusal", "out_of_period"
+        plan.refusal = guard_mod.GuardResult(
+            True, "out_of_range", reason).answer(self.data_period)
+        plan.notes.append("区间闸：%s" % reason)
+        return True
+
+    def _reconcile_intent(self, plan: Plan) -> None:
+        """把 `core.intent` 的判定并进 Planner —— Planner 是唯一的规划权威。
+
+        这一层原来在 Service 里（`core.routing.apply_intent`）：Planner 返回之后又跑
+        一次分类、再改写 `intent`/`kind`，等于第二套规划权威。泛化 R3 收进来之后，
+        返回的 Plan 就是最终 Plan，Service 只负责 trace / 排期 / 落历史。
+
+        与旧实现只有一处语义差别：真 hybrid 现在**直接**是 `intent="hybrid"`
+        （旧实现把它压成 `intent="data"` + `slots["two_part"]=True`，
+        让 Answerer 再补文档那一半）——行为相同，数据模型不再撒谎。
+        """
+        from .core import intent as intent_mod
+        from .core import routing as routing_mod
+
+        if plan.intent == "clarify":
+            return
+        if plan.intent == "refusal" and plan.kind == "need_context":
+            # 追问但没有上文：真的没法答，意图复核不该把它掰成能回答的问题。
+            return
+
+        planner_intent, planner_kind = plan.intent, plan.kind
+        hinted = intent_mod.find_metric(E.focus_text_for_metric(plan.standalone))
+        intent = intent_mod.classify(plan.standalone, metric_word=hinted)
+
+        if plan.kind == "compare":
+            # 追问还原的 standalone 是拼接产物、常常没有指标词，分类器会判成 doc；
+            # 但 planner 那边有更硬的证据：两个时间窗 + 涨跌词。保留 planner 的结论。
+            plan.notes.append("意图复核：planner 已判定两期对比，保留其结论")
+        else:
+            year = plan.as_of.year if plan.as_of else self.today.year
+            misread = (
+                plan.intent == "refusal" and plan.kind == "out_of_period"
+                and not routing_mod.explicit_months(plan.standalone, year)
+            )
+            if intent.kind == "doc":
+                plan.intent, plan.kind = "doc", "doc"
+                if misread:
+                    plan.slots["window_ignored"] = True
+            elif intent.kind == "hybrid":
+                plan.intent = "hybrid"
+                if misread:
+                    plan.kind = "price" if intent.price_now else "summary"
+                    plan.slots["window_ignored"] = True
+                elif intent.price_now and plan.kind in ("summary", "doc"):
+                    plan.kind = "price"
+                elif plan.kind == "doc":
+                    # doc 是"问规定"的形状；数字那一半要按汇总取数。
+                    plan.kind = "summary"
+            elif misread:
+                # 意图复核也说是 data，但 planner 的 refusal 来自"现在"被误当时间窗：
+                # 放行成数据问题，让槽位继承去补时间窗。
+                plan.intent, plan.kind = "data", "summary"
+                plan.slots["window_ignored"] = True
+
+        plan.slots["intent_confidence"] = intent.confidence
+        plan.slots["intent_hints"] = intent.hints
+        if intent.why:
+            plan.slots["asks_why"] = True
+        plan.notes.append(
+            "意图复核：planner=%s/%s → 最终=%s/%s"
+            % (planner_intent, planner_kind, plan.intent, plan.kind))
+
+    def _finalize(self, plan: Plan, spec: TimeSpec, inherited: dict) -> None:
+        """Plan 定稿：派生 needs、生成 provenance、校验不变量。
+
+        `needs_data` / `needs_docs` **只由 intent 派生**（唯一权威），
+        所以"intent=doc 却 needs_data=True"这种自相矛盾在结构上不可能出现。
+        """
+        plan.needs_data = plan.intent in ("data", "hybrid")
+        plan.needs_docs = plan.intent in ("doc", "hybrid")
+        plan.provenance = {
+            "store": plan.slots.get("store_source") or "none",
+            "product": plan.slots.get("product_source") or "none",
+            "window": (
+                "derived" if spec.first_month
+                else "explicit" if spec.explicit
+                else "default"
+            ),
+            "metric": (
+                "explicit" if plan.slots.get("metric_explicit")
+                else "inherited" if inherited.get("metric")
+                else "default"
+            ),
+        }
+        problems = plan.validate()
+        if problems:
+            # 不静默修：出现这种状态说明代码有 bug，直接炸出来（测试/现场都能立刻看到）。
+            raise AssertionError("plan 不变量被破坏：%s / %s" % (problems, plan.as_trace()))
 
     def _build_search_query(self, plan: Plan, spec: TimeSpec) -> None:
         # “现在/今天/目前”只是判生效日期用的，检索时是纯噪声，去掉。
