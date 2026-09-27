@@ -417,14 +417,12 @@ class Answerer(HybridAnswers):
                 answer_type="refusal",
                 notes=[reason or "没有可以逐字引用的原文"],
             )
-        if plan.slots.get("underspecified") and top_score < CLARIFY_SCORE:
-            # 问得太泛、检索也没有明显命中：宁可反问，也不要拿一段不相干的原文充数。
-            return Answer(
-                answer="这个问题我没抓住重点：是想查某段时间的经营数字，还是想看某条规定？"
-                "补一个指标、时间或者门店，我就能答。",
-                answer_type="clarify",
-                notes=["检索最高分 %.1f，且问题里没有指标、时间或门店" % top_score],
-            )
+        # `_doc_block` has already selected a citation-backed source.  A short
+        # newly added document can have a low BM25 score even when it is the
+        # only authoritative hit; refusing it solely because the user omitted
+        # a date/store would make KB additions unreachable through `/api/chat`.
+        # Keep the score threshold for diagnostics, but let a selected source
+        # answer the question.
         # **引用正文就是答案**：不要在前面再拼一遍整篇文档。
         # starter 拼了（`self._context(result) + body`），于是 answer 变成
         # "整篇原文 + 结论"，超 1200 字上限的题全部判红（D17）。
