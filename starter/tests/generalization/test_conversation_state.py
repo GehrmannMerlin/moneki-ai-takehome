@@ -63,6 +63,38 @@ def test_successful_turn_persists_semantics_but_not_answer_numbers(service):
     assert response["answer"]
 
 
+def test_execution_derived_window_is_committed_from_selected_evidence():
+    from datetime import date
+
+    from kbqa.conversation import ContextPatch, ConversationState, transition
+    from kbqa.planner import Plan
+    from kbqa.schemas import Answer
+
+    plan = Plan(
+        question="首月销量",
+        standalone="首月销量",
+        search_query="首月销量",
+        window=("2026-05-01", "2026-08-31"),
+        as_of=date(2026, 8, 31),
+        metric="qty",
+        provenance={"window": "derived", "metric": "explicit"},
+    )
+    answer = Answer(
+        answer="ok",
+        answer_type="data",
+        data_evidence=[{
+            "tool": "query_metrics",
+            "params": {"start": "2026-06-01", "end": "2026-06-30"},
+            "result": {"qty": 3},
+        }],
+    )
+    patch = ContextPatch.from_plan(plan, answer)
+    state = transition(ConversationState.empty(), patch, epoch="r5")
+
+    assert patch.provenance["window"] == "execution-derived"
+    assert state.window == ("2026-06-01", "2026-06-30")
+
+
 def test_time_override_inherits_independent_entity_slots(service):
     stores = service.tools.stores()
     products = service.tools.products()

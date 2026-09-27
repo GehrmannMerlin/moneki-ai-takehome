@@ -506,6 +506,6 @@ assistant 的完整答案不进入 prompt，因此旧轮次的数字不会被模
 本身不随 session LRU 清理。SQLite 默认 `max_turns=12`、`max_sessions=500`，前者物理
 删除旧 turn，后者按 access sequence 淘汰最久未访问 session。
 
-R5 本机验证：`pytest tests/generalization/test_conversation_state.py -q` 为 **17 passed**，
-`pytest tests/generalization` 为 **154 passed**；真实 live 评测因未配置
+R5 本机验证：`pytest tests/generalization/test_conversation_state.py -q` 为 **18 passed**，
+`pytest tests/generalization` 为 **155 passed**；真实 live 评测因未配置
 `LLM_API_KEY` 仍为 **NOT RUN**。

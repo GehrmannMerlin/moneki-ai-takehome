@@ -173,6 +173,7 @@ class ContextPatch:
         for candidate in (effective, compare):
             if candidate and candidate not in windows:
                 windows.append(candidate)
+        execution_effective: Optional[Window] = None
         if answer is not None:
             for evidence in getattr(answer, "data_evidence", []) or []:
                 params = evidence.get("params") if isinstance(evidence, dict) else None
@@ -181,12 +182,19 @@ class ContextPatch:
                 candidate = _window((params.get("start"), params.get("end")))
                 if candidate and candidate not in windows:
                     windows.append(candidate)
-                    if effective is None:
-                        effective = candidate
+                if candidate and execution_effective is None:
+                    execution_effective = candidate
                 for start_key, end_key in (("start_a", "end_a"), ("start_b", "end_b")):
                     candidate = _window((params.get(start_key), params.get(end_key)))
                     if candidate and candidate not in windows:
                         windows.append(candidate)
+                    if candidate and execution_effective is None:
+                        execution_effective = candidate
+        if execution_effective and provenance.get("window") == "derived":
+            # A first-month/other planner-derived scope is only authoritative
+            # after the selected current-turn receipt confirms the exact range.
+            effective = execution_effective
+            provenance["window"] = "execution-derived"
         citations = getattr(answer, "citations", []) if answer is not None else []
         anchors = [
             str(item.get("doc_id"))

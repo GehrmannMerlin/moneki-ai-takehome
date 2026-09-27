@@ -1015,6 +1015,14 @@ def content_key(kb_dir: Path) -> str:
 | **根因** | semantic state 已保存 `kind=price`，但 Planner 只从当前短句词面决定 kind；当前句没有“价格”词时，实体/时间继承只触发通用数据路线。 |
 | **修复 / GREEN** | `f22cc00` 将上一轮 `intent/kind` 纳入 Resolution；无新指标/政策/事件操作的 time-only continuation 保留上一轮 kind。最终官方 mock `eval/run_eval.py` 为 **100.00 / 100.00**，T03 全绿。 |
 
+## 缺陷 #69：execution-derived scope 没有独立进入 state provenance【泛化 R5 已修复】
+
+| 项 | 内容 |
+|---|---|
+| **现象** | `ContextPatch` 已读取当前轮 `data_evidence.params`，但 Planner 产生的 `derived` 时间窗在 state 中仍保留为普通 `derived`，无法区分“计划推导”与“本轮 receipt 确认的实际窗口”。 |
+| **根因** | patch 只把证据窗口追加到 `effective_windows`，没有在 selected evidence 确认 derived scope 后提升 `provenance["window"]`。 |
+| **修复 / GREEN** | 当前实现把 `derived + selected start/end` 标记为 `execution-derived`，并以该窗口生成下一轮 state；新增 `test_execution_derived_window_is_committed_from_selected_evidence`。R5 18 条与泛化 155 条通过。 |
+
 ---
 
 ## 附：现场调试演练计时（P5 §3，模拟评委 40 分钟环节）

@@ -750,8 +750,8 @@ SQLite 会话表带有 `epoch` 与单调 `access_seq`：`data_fingerprint + kb i
 收到的是结构化语义状态，不再把上一轮 assistant 自然语言答案拼进 prompt；本轮数字
 仍只能来自本轮工具回执。
 
-R5 验证记录：`pytest tests/generalization` 为 **154 passed**，其中新增
-`tests/generalization/test_conversation_state.py` 为 **17 passed**。完整测试与官方
+R5 验证记录：`pytest tests/generalization` 为 **155 passed**，其中新增
+`tests/generalization/test_conversation_state.py` 为 **18 passed**。完整测试与官方
 mock 评测的最终结果以 `EVAL_REPORT.md` §11 为准；当前环境使用 Python 3.11.8，仓库
 要求为 Python 3.12+，因此完整测试中的版本门槛失败应按环境限制单独记录。
 

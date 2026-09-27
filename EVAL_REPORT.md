@@ -882,10 +882,10 @@ Planner 的 canonical 输入，当前轮工具回执负责事实。状态不保�
 | 检查 | 结果 |
 |---|---:|
 | R5 RED 快照（commit `639e0d0`） | 13 failed / 4 passed（故意红） |
-| R5 状态回归 `pytest tests/generalization/test_conversation_state.py -q` | **17 passed** |
-| 泛化套件 `pytest tests/generalization` | **154 passed** |
+| R5 状态回归 `pytest tests/generalization/test_conversation_state.py -q` | **18 passed** |
+| 泛化套件 `pytest tests/generalization` | **155 passed** |
 | 官方 mock `eval/run_eval.py`（实现前基线；实现后最终复跑） | **100.00 / 100.00；100.00 / 100.00** |
-| 完整后端 `pytest tests` | 387 passed / 1 failed：当前解释器 3.11.8 未满足仓库 Python ≥3.12 门槛 |
+| 完整后端 `pytest tests` | 388 passed / 1 failed：当前解释器 3.11.8 未满足仓库 Python ≥3.12 门槛 |
 | 真实 Key live 评测 | **NOT RUN**：本机未配置 `LLM_API_KEY` |
 
 官方 mock 评分未因 R5 代码改动降低：基线与最终复跑均为 **100.00 / 100.00**。

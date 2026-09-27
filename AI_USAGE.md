@@ -529,4 +529,4 @@ P0 阶段让 AI 写"缓存键"红测试时，我用的 prompt 大意是：
 - **RED 证据**：先提交 `639e0d0`，`test_conversation_state.py` 在未实现状态层时记录为 **13 failed / 4 passed**。其中失败覆盖了空的 `sessions.slots`、SQLite retention/LRU/restart、epoch 失效、旧 assistant 答案注入以及多轮时间/指标/实体继承。
 - **实现链**：`603e3d4` 加入 `ConversationState`、`ContextPatch`、SQLite epoch/access sequence 与物理 retention；`a34c2b2` 将 FollowUps 从字符串重写改为确定性的 `Resolution`/槽位合并；`b9a7f01` 把 Service 成功轮次接到原子 transition，并让 Live 使用结构化会话上下文；随后 `2dab329` 修正事件话题的陈旧时间隔离，`f22cc00` 修正 time-only continuation 保留上一轮业务 kind。
 - **调试教训**：一次失败最初看起来像“时间继承错了”，实际 trace 显示 `None` 被字符串化为 `("None", "None")`；修复 `_window` 的边界归一化后，门店覆盖、双窗口对比和公开 T01 一起恢复。另一个测试原先用“8 号那天呢？”期待澄清，但已有月份时这句话可合法继承；改为真正含糊的代词追问，避免用错误的测试构造逼生产代码改变正确语义。
-- **验证**：R5 套件最终 **17 passed**，`tests/generalization` 最终 **154 passed**，官方 mock 评测最终 **100.00 / 100.00**。真实 LLM Key 未配置，live 供应商复验仍保持 NOT RUN，不用 mock 结果冒充真实模型结果。
+- **验证**：R5 套件最终 **18 passed**，`tests/generalization` 最终 **155 passed**，官方 mock 评测最终 **100.00 / 100.00**。真实 LLM Key 未配置，live 供应商复验仍保持 NOT RUN，不用 mock 结果冒充真实模型结果。
