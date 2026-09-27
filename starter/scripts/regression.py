@@ -176,12 +176,12 @@ def main() -> int:
     print("\n题库：%s ｜ 原始报告：%s" % (args.questions, OUT_DIR / "report.json"))
 
     if regressed:
-        print("⚠️ 以下类别低于基线：%s" % "、".join(regressed))
+        print("[WARN] 以下类别低于基线：%s" % "、".join(regressed))
         return 1
     if not tests_ok:
-        print("⚠️ 单元测试有失败（见上）")
+        print("[WARN] 单元测试有失败（见上）")
         return 1
-    print("✅ 无回退：所有类别不低于基线，单元测试通过。")
+    print("[OK] 无回退：所有类别不低于基线，单元测试通过。")
     return 0
 
 
