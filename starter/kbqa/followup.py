@@ -153,7 +153,8 @@ class FollowUps:
     def inherit_time(self, plan, spec: TimeSpec, question: str, inherited: dict) -> None:
         """Fill only missing time from semantic state; never from old text."""
         recent = [tuple(window) for window in (inherited.get("recent_windows") or []) if window]
-        if not spec.windows and not spec.relative_now:
+        topic_shift = bool(re.search(r"(供应商|赔偿|赔了|断供|停售|事故|通知)", question))
+        if not spec.windows and not spec.relative_now and not topic_shift:
             days = loose_days(question)
             anchor = recent[-1] if recent else inherited.get("window")
             if days and not anchor:

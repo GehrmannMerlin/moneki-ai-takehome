@@ -11,14 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
+import re
+
 
 Window = tuple[str, str]
 
 
 def _window(value: Any) -> Optional[Window]:
     if isinstance(value, (list, tuple)) and len(value) >= 2:
+        if value[0] is None or value[1] is None:
+            return None
         start, end = str(value[0]).strip(), str(value[1]).strip()
-        if start and end:
+        if start and end and start.lower() != "none" and end.lower() != "none":
             return (start, end)
     return None
 
@@ -27,6 +31,25 @@ def _windows(value: Any) -> list[Window]:
     if not isinstance(value, (list, tuple)):
         return []
     return [window for item in value if (window := _window(item))]
+
+
+def _topic_anchor(text: str) -> str:
+    """Keep semantic topic words while removing temporal/query scaffolding."""
+    value = re.sub(r"[？?。，,、：:；;！!]", " ", text or "")
+    value = re.sub(
+        r"(?:20\d{2}\s*年\s*)?[0-9一二两三四五六七八九十]{1,3}\s*月"
+        r"(?:\s*[0-9一二两三四五六七八九十]{1,3}\s*[日号])?"
+        r"(?:\s*(?:初|中旬?|底))?",
+        " ", value,
+    )
+    value = re.sub(r"20\d{2}\s*年|[0-9一二两三四五六七八九十]{1,3}\s*[日号]", " ", value)
+    for word in (
+        "现在", "目前", "当前", "今天", "此刻", "最近", "当时", "那时", "时候",
+        "首月", "第一个月", "为什么", "为何", "怎么", "多少", "是不是", "吗", "呢",
+        "那", "那么", "接着", "然后", "的", "了", "吧",
+    ):
+        value = value.replace(word, " ")
+    return " ".join(value.split())
 
 
 @dataclass
@@ -170,6 +193,9 @@ class ContextPatch:
             for item in citations or []
             if isinstance(item, dict) and item.get("doc_id")
         ]
+        current_topic = _topic_anchor(getattr(plan, "question", ""))
+        previous_topic = _topic_anchor(getattr(plan, "slots", {}).get("topic_query", ""))
+        topic_parts = [part for part in (current_topic, previous_topic) if part]
         return cls(
             store_id=getattr(plan, "store_id", None),
             product_id=getattr(plan, "product_id", None),
@@ -182,7 +208,7 @@ class ContextPatch:
             historical=bool(getattr(plan, "slots", {}).get("historical")),
             intent=getattr(plan, "intent", None),
             kind=getattr(plan, "kind", None),
-            topic_query=str(getattr(plan, "search_query", "") or ""),
+            topic_query=" ".join(dict.fromkeys(topic_parts)),
             topic_kind=getattr(plan, "kind", None),
             source_anchors=anchors,
             continuation=bool(getattr(plan, "continuation", False)),
@@ -200,4 +226,56 @@ def merge_recent_windows(
         if normalized and normalized not in merged:
             merged.append(normalized)
     return merged[-max(0, limit):]
+
+
+def transition(
+    previous: ConversationState,
+    patch: ContextPatch,
+    *,
+    epoch: str,
+) -> ConversationState:
+    """Apply one successful, code-owned turn to semantic session state.
+
+    The answer text and tool receipts are deliberately absent from this
+    transition.  A new topic replaces the old semantic scope; a continuation
+    uses the already-resolved Plan fields and only carries forward bounded
+    recent windows.  Default document scope is not a real user-mentioned
+    window and therefore cannot become comparison context.
+    """
+    window_provenance = patch.provenance.get("window")
+    effective_window = patch.effective_window
+    if window_provenance == "default":
+        effective_window = None
+
+    current_windows = patch.effective_windows
+    if window_provenance == "default":
+        current_windows = []
+    recent = merge_recent_windows(
+        previous.recent_windows if patch.continuation else [],
+        current_windows,
+    )
+
+    return ConversationState(
+        schema_version=1,
+        epoch=epoch,
+        store_id=patch.store_id,
+        product_id=patch.product_id,
+        metric=patch.metric,
+        window=effective_window,
+        compare_window=patch.compare_window,
+        recent_windows=recent,
+        as_of=patch.as_of,
+        historical=patch.historical,
+        intent=patch.intent,
+        kind=patch.kind,
+        topic_query=patch.topic_query,
+        topic_kind=patch.topic_kind,
+        source_anchors=(
+            list(patch.source_anchors)
+            if patch.source_anchors
+            else list(previous.source_anchors) if patch.continuation else []
+        ),
+        continuation=patch.continuation,
+        provenance=dict(patch.provenance),
+    )
 

@@ -64,6 +64,13 @@ PLAN_CONTEXT_HEADER = (
     "已解析范围：\n"
 )
 
+SESSION_CONTEXT_HEADER = (
+    "\n\n【会话语义状态（应用层可信）】\n"
+    "下面只包含可用于解析本轮追问的结构化槽位；它不是上一轮回答，也不是事实收据。"
+    "不要把其中的字段当成已经查到的业务数字；本轮数字仍必须通过工具重新取得。\n"
+    "语义状态：\n"
+)
+
 #: 工具轮次用尽后的强制作答指令：让"没找到"以正文形式说出来，
 #: 而不是抛 LLMError 变成"工具调用没有收敛"这种评测不认的 refusal。
 FORCE_FINAL_NOTE = (
@@ -126,9 +133,9 @@ class LiveEngine:
 
     # -- 主流程 -----------------------------------------------------------------
 
-    def answer(self, plan: Plan, trace, history: list[dict]) -> Answer:
+    def answer(self, plan: Plan, trace, state=None) -> Answer:
         deadline = time.perf_counter() + self.budget
-        messages = self._initial_messages(plan, history)
+        messages = self._initial_messages(plan, state)
         ledger = FactLedger()
         retrieved: list = []
         bad_args = 0
@@ -244,7 +251,7 @@ class LiveEngine:
 
     # -- 组装 -------------------------------------------------------------------
 
-    def _initial_messages(self, plan: Plan, history: list[dict]) -> list[dict]:
+    def _initial_messages(self, plan: Plan, state=None) -> list[dict]:
         system = SYSTEM_PROMPT.format(
             today=self.today, start=self.data_period["start"], end=self.data_period["end"]
         )
@@ -253,10 +260,11 @@ class LiveEngine:
         # 于是 Planner 认对了、模型又猜错了。现在解析结果直接下传。
         system += PLAN_CONTEXT_HEADER + json.dumps(
             plan.as_model_context(), ensure_ascii=False, indent=2)
+        if hasattr(state, "to_dict"):
+            system += SESSION_CONTEXT_HEADER + json.dumps(
+                state.to_dict(), ensure_ascii=False, indent=2
+            )
         messages = [{"role": "system", "content": system}]
-        for turn in history[-3:]:
-            messages.append({"role": "user", "content": turn.get("question", "")})
-            messages.append({"role": "assistant", "content": turn.get("answer", "")})
         question = plan.question
         if plan.standalone and plan.standalone != plan.question:
             question += "\n（这是一句追问，完整问题是：%s）" % plan.standalone

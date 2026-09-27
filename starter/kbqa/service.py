@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from hashlib import sha256
 from typing import Any, Optional
 
 from .answerer import Answerer
@@ -19,6 +20,7 @@ from .core.sanitize import sanitize
 from .core.store import SessionStore, TraceStore
 from .docfacts import DocFacts
 from .config import Settings, load_settings
+from .conversation import ContextPatch, transition
 from .entities import Catalog
 from .live import LiveEngine
 from .llm import LLMClient, LLMError
@@ -89,6 +91,7 @@ class Service:
         store = self.settings.var_dir / "app.db"
         self.sessions = SessionStore(store)
         self.traces = TraceStore(store)
+        self.context_epoch = ""
         self.rebuild(only_if_missing=True)
 
     # -- 启动与重建 -------------------------------------------------------------
@@ -114,6 +117,9 @@ class Service:
         self.tools = DataTools(self.engine)
         # 索引内容寻址：KB 内容变了 key 就变，缓存自动失效（修 D11）
         self.index = load_index(settings.kb_dir, settings.index_path, rebuild=not only_if_missing)
+        self.context_epoch = sha256(
+            ("%s:%s" % (data_fp, self.index.key)).encode("utf-8")
+        ).hexdigest()
         self.retriever = Retriever(self.index, settings.today)
         self.catalog = Catalog(
             stores=self.tools.stores(), products=self.tools.products(), aliases=self.index.aliases
@@ -337,29 +343,37 @@ class Service:
                 return Answer(answer=guarded.answer(self.data_period),
                               answer_type="refusal", notes=[guarded.reason])
 
-            history = self.sessions.history(session_id)
+            state = self.sessions.load_state(session_id, self.context_epoch)
+            trace.step("session_state_before", state.to_dict())
+            if state.invalidation_reason:
+                trace.step("session_state_invalidated", {
+                    "reason": state.invalidation_reason,
+                    "epoch": self.context_epoch,
+                })
             started = time.perf_counter()
-            # **必须把历史传进去**：追问解析（"那 7 月呢"）靠它补全指代，
-            # 不传的话 planner 只能判"这个会话里没有上文"→ clarify，
-            # 多轮类 9 分全灭。P3 第一版这里漏了 `history`，是测试逼出来的。
             #
             # 返回的 Plan 就是本 turn 的**唯一规划权威**（泛化 R3）：区间闸与意图复核
             # 都已经在 Planner 内部完成，Service 不再重新分类、也不再改 Plan 的任何
             # 规划字段。Service 只做：trace → 选引擎 → 落历史。
-            plan = self.planner.plan(question, history)
+            plan = self.planner.plan(question, state)
             trace.step("plan", plan.as_trace(), started=started)
 
-            answer = self._run_engine(plan, trace, history)
-            self.sessions.append(
-                session_id,
-                {
-                    "question": question,
-                    "standalone": plan.standalone,
-                    "slots": plan.slots,
-                    "answer": answer.answer,
-                    "answer_type": answer.answer_type,
-                },
-            )
+            answer = self._run_engine(plan, trace, state)
+            turn = {
+                "question": question,
+                "standalone": plan.standalone,
+                "slots": plan.slots,
+                "answer": answer.answer,
+                "answer_type": answer.answer_type,
+            }
+            if answer.answer_type in ("data", "doc", "hybrid"):
+                patch = ContextPatch.from_plan(plan, answer)
+                next_state = transition(state, patch, epoch=self.context_epoch)
+                self.sessions.append_with_state(session_id, turn, next_state)
+                trace.step("session_state_after", next_state.to_dict())
+            else:
+                self.sessions.append(session_id, turn)
+                trace.step("session_state_unchanged", state.to_dict())
             return answer
         except Exception as exc:  # noqa: BLE001 - 不管里面出什么事，接口都得给个像样的回答
             trace.error("pipeline", exc)
@@ -369,7 +383,7 @@ class Service:
                 notes=["pipeline 异常：%s" % exc],
             )
 
-    def _run_engine(self, plan, trace: Trace, history: list[dict]) -> Answer:
+    def _run_engine(self, plan, trace: Trace, state) -> Answer:
         if not self.settings.live or plan.intent == "refusal":
             started = time.perf_counter()
             answer = self.answerer.answer(plan, trace)
@@ -391,7 +405,7 @@ class Service:
         )
         started = time.perf_counter()
         try:
-            answer = engine.answer(plan, trace, history)
+            answer = engine.answer(plan, trace, state)
             trace.step("answer_live", {"answer_type": answer.answer_type}, started=started)
             return answer
         except LLMError as exc:
