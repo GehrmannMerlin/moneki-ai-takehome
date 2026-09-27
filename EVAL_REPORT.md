@@ -896,3 +896,139 @@ Python 版本失败是环境前置条件，不将其改写成代码通过。
 R5 没有改变 R4 的引用、sanitize、FactLedger 或评测判分逻辑，也没有声称真实模型
 在本机已复验。`ConversationState` 的来源锚点只帮助下一轮检索定位，不能替代本轮
 证据；context epoch 变化后旧 state 只返回空状态并写入 trace 的 invalidation 事件。
+
+---
+
+## Final R6 — Hidden-Eval Stress & DeepSeek Validation（2026-09-27）
+
+本节是当前交付结果；§0–§11 保留各轮的历史快照。当前代码在 R6 production source
+SHA `14dbbdb` 上完成压力测试；之后只增加交付文档与评测边界修复，不把历史 live
+满分覆盖掉，也不把自造题库称为官方 hidden set。
+
+### 1. 基线与最终验证矩阵
+
+| 检查 | 结果 |
+|---|---|
+| Branch | `codex/r6-hidden-eval`（隔离 worktree） |
+| Base / origin/main at start | `ea3ea23d` / `ea3ea23d`；开始时 ahead/behind 为 `0/0` |
+| Python | `3.12.6` |
+| 官方 public mock | **100.00 / 100.00，55/55 全绿** |
+| 官方 public live | **72.00 / 100.00，43/55**，`deepseek-flash` |
+| Self-authored extra live | **23.00 / 28.00，9/12**；只作扩展回归，不是官方分数 |
+| Generalization | **171 passed** |
+| `pytest starter/tests -q` | **406 passed，9 warnings** |
+| Full `pytest -q` | **666 passed，9 warnings，124 subtests**；本轮新增 eval 边界回归 4 条已通过 |
+| `scripts/swap_check.py` | **通过** |
+| Fake DeepSeek preflight | **P1–P14 全部通过**；44 tool calls、60 POST calls、最长 hang 约 121.44s |
+| R6 deterministic/mock harness | 多个 generated variants、所有 mock matrix/scenario 回归通过 |
+
+Full pytest 中保留的 9 个 warning 是既有 Windows 子进程 GBK 解码线程警告与
+FastAPI/Starlette 弃用警告，没有新增失败；R6 还修正了 `run_eval.py` 对声明过大的
+`Content-Length` 响应的提前拒绝，以及 `llm_gateway.py` 把 Windows 连接建立超时误记为
+P11 服务 hang 的边界（`718d046`）。
+
+### 2. R6 设计与 inventory
+
+| 维度 | 设计 / 执行结果 |
+|---|---|
+| Data variants | 4 个 family：`values`、`rows`、`entities`、`dirty`；动态门店/商品 ID 由 seed 生成，未复用 public gold |
+| KB variants | 7 个 family：`edit_add`、`version`、`formats`、`injection`、`conflict`、`delete`、`hybrid` |
+| Generated single-turn bank | 每个 variant 9 个自然语言 case（其中按 authority 可运行的 3 个进入 live/mock matrix）；12 条静态 metadata-only hidden-style bank |
+| Paraphrase | 指标“销量/营业额/流水”、自然时间表达、动态实体与 ranking 语义；动态 matrix 含独立 paraphrase case |
+| Multi-turn | `metric-change`（销量→营业额→订单数）与 `store-isolation`；交错 session、dataset epoch 与旧状态边界均有测试 |
+| Injection variants | 多形态中文/英文混合 instruction override、fake system、固定数字与禁止引用要求；sanitizer/model projection/citation 三层检查 |
+| Source conflicts | 正式通知 vs 估算/参考文档，另有 current/past version family；authority 与 as-of 由独立 case 检查 |
+| New-document E2E | 运行前不存在的动态 KB 文档：创建 → rebuild → index metadata → `/api/retrieve` → `/api/chat` → `/api/trace`，citation 与 source quote 均验证 |
+| Holdout | mock fresh holdout seed `1087657`：3/3 单轮、2/2 多轮；真实 live 同 seed：2/3 单轮、2/2 多轮，唯一失分是模型拒答“流水”这一同义表达 |
+
+数据 expected 由生成 SQLite 的独立 SQL/reference calculation 得出，不调用 Planner、
+Answerer 或 LiveEngine；文档 expected 从本次生成的 source document、版本元数据、连续
+quote 与实际 fingerprint 得出。所有 case 通过真实 HTTP 边界运行，而不是只调用内部函数。
+
+### 3. R6 mutation / hidden-style 结果
+
+| Variant / family | 覆盖能力 | 结果 |
+|---|---|---|
+| dynamic `entities` + `hybrid` | 新 S/P 实体、数据/文档混合、自然追问、session isolation | live repeat 3 次中 8/9 matrix 通过（一次 live 模型拒答）；所有 6 个 scenario 通过 |
+| `version` | v1→v2→v3、current / historical / as-of | real live family run 无 harness failure |
+| `injection` | attack source、safe projection、answer/citation 不带攻击数字 | real live family run 无 harness failure |
+| `conflict` | 正式通知优先于估算/参考数字 | matrix 4/4；store-isolation 的 S100 是 harness 边界，已由 `_secondary_generated_ids` 修复 |
+| `formats` / `delete` / `dirty` | `.md/.txt/.html`、删除旧事实、脏行清洗 | 由 R6 deterministic tests 与动态 source/oracle 检查覆盖 |
+| new document | 动态 `KB-*` 文档不改 production mapping 即可检索与引用 | mock 与 live selected runs 通过；trace 可按下列链路定位 |
+
+新增文档的实际定位链路固定为：
+
+```text
+generated source document
+  → rebuild / build_manifest fingerprint
+  → index metadata
+  → retrieve result
+  → KnowledgeReceipt / retrieval_scope
+  → citation_selected 或 citation_rejected
+  → final_validation
+  → /api/chat answer
+```
+
+一条实际动态问题是 `2026 年 7 月 S91 的销量是多少？`；它的实体与数值来自生成
+数据库，而不是生产代码中的 `S01`/`P06` 或公开答案常量。最终 holdout 使用了
+不同的动态实体与 seed，没有在修复过程中用于调参。
+
+### 4. Real DeepSeek：公开集、extra 与稳定性
+
+环境只记录 `LLM_API_KEY: configured`，绝不记录值；模型为 `deepseek-flash`，endpoint
+通过当前进程的 `LLM_BASE_URL` 注入。最终公开 live report 的延迟为 median **0.078s**、
+max **37.937s**、总计 **402.171s**；extra report median **5.812s**、max **28.016s**、
+总计 **93.984s**。预检的 hang/slow 场景另以 180 秒整体预算验收，最长约 121.44 秒。
+
+最终公开 live 分类为：
+
+| 类别 | 得分 | 说明 |
+|---|---:|---|
+| metrics / retrieval / data | **6/6、15/15、12/12** | 稳定通过 |
+| doc | **10/16** | C01/C04/C06 出现回答类型、事实或引用缺口 |
+| version | **0/6** | V01–V03 未稳定完成 current/historical 语义传达 |
+| hybrid | **6/18** | H01/H02/H05/H06 有 refusal、数字或 evidence 缺口 |
+| multi-turn | **8/9** | T02 部分 turn 缺少完整事实/引用 |
+| refusal / safety / health | **8/8、6/9、1/1** | 拒答和健康稳定；安全有一条 live 语义失分 |
+
+公开 live 未通过的题号是 `C01,C04,C06,V01,V02,V03,H01,H02,H05,H06,T02,S01`；
+extra 未通过的是 `X05,X06,X08`。这些都是评测报告里的结构化失败项，raw assistant
+正文与请求日志没有提交。此前同一代码附近的一次公开 live 为 **78/100**，而当前
+最终运行是 **72/100**；因此将文档/版本/混合题的真实模型表现标为“可见且有波动”，
+不声称 DeepSeek live 已经 100%，也不把这一波动改写成 production defect。
+
+### 5. Confirmed R6 production defects
+
+| ID | 现象 | RED → generic fix | 回归 |
+|---|---|---|---|
+| R6-1 | 新增短文档已被正确检索，但 `_answer_doc` 因低 BM25 分数在 citation 之后又澄清，导致真实 HTTP 新文档题不可达 | `22c386c` → `112ef96` | R6 E2E、generalization、full suite；短文档只要有可信 citation 即可回答 |
+| R6-2 | 文档较长且多个数字同在 chunk 时，最终答案 claim 与初始 citation quote 漂移，repair 仍可能拿错数字所在 chunk | `17af227` RED → `5649638` claim-aware quote → `72ca5e8` unsupported-number reselect | 73 条 targeted live/citation tests；公开 live 的数据/检索边界保持通过 |
+
+R6-1/R6-2 均是先由真实 HTTP/trace 或 RED test 证明，再做通用修复；没有按某个固定
+题号、固定公开数字或动态 ID 写特殊分支。Windows `718d046` 与 `14dbbdb` 是评测工具
+边界修复，不计作 production 问答缺陷。
+
+### 6. Final holdout 的判定
+
+holdout seed `1087657` 在修复完成后才生成并执行。mock 路径为 **3/3 单轮 + 2/2
+多轮**；真实 live 路径为 **2/3 单轮 + 2/2 多轮**。失败 case 是动态 paraphrase
+“这月份 S98 的流水有多少？”返回 `answer_type=refusal`，而不是产生无证据数字；
+同一 case 的 mock oracle 通过，且 live 主变体的同类数据/paraphrase 通过。证据支持的
+判断是模型对“流水”这一业务同义词的理解/采样风险，不是检索、oracle、state 或 citation
+代码的确定性缺陷，所以没有为了追求 holdout 100% 修改 production，也没有重复调同一
+holdout。这个结果应被评委理解为“holdout 暴露了剩余模型风险”，而不是隐藏集保证。
+
+### 7. 交付审计
+
+| 审计项 | 结果 |
+|---|---|
+| 文档一致性 | README、DEBUG_LOG、EVAL_REPORT、LLM_SETUP、AI_USAGE、DEMO 均补充 Final R6；旧分数保留并标为历史 |
+| tracked absolute path | 当前源码/交付文档无开发机依赖路径；历史 `eval/_*` 评测快照保留当时生成的 Windows 路径作为不可变证据，但不参与运行 |
+| real secret | tracked files 与 R6 commits 中 **0 次**；只保留 `configured` 布尔事实 |
+| `.env` / raw traffic / temp DB / variant root | 未跟踪；R6 report、traffic、临时目录加入 `.gitignore` |
+| Git history | RED → FIX → regression → docs 链路保留，未 squash、未 force push |
+| evaluator semantics | 未改 public question 或评分逻辑；`run_eval.py` 只修了既有响应体边界，评分规则未改 |
+
+最终状态：**R1 COMPLETE · R2 COMPLETE · R3 COMPLETE · R4 COMPLETE · R5 COMPLETE ·
+R6 COMPLETE**。原计划的 standalone Round 7 已按任务要求合并为本节的文档、路径、secret、
+artifact 与 Git delivery hygiene；不另起 R7 架构任务。

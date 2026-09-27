@@ -530,3 +530,14 @@ P0 阶段让 AI 写"缓存键"红测试时，我用的 prompt 大意是：
 - **实现链**：`603e3d4` 加入 `ConversationState`、`ContextPatch`、SQLite epoch/access sequence 与物理 retention；`a34c2b2` 将 FollowUps 从字符串重写改为确定性的 `Resolution`/槽位合并；`b9a7f01` 把 Service 成功轮次接到原子 transition，并让 Live 使用结构化会话上下文；随后 `2dab329` 修正事件话题的陈旧时间隔离，`f22cc00` 修正 time-only continuation 保留上一轮业务 kind。
 - **调试教训**：一次失败最初看起来像“时间继承错了”，实际 trace 显示 `None` 被字符串化为 `("None", "None")`；修复 `_window` 的边界归一化后，门店覆盖、双窗口对比和公开 T01 一起恢复。另一个测试原先用“8 号那天呢？”期待澄清，但已有月份时这句话可合法继承；改为真正含糊的代词追问，避免用错误的测试构造逼生产代码改变正确语义。
 - **验证**：R5 套件最终 **18 passed**，`tests/generalization` 最终 **155 passed**，官方 mock 评测最终 **100.00 / 100.00**。真实 LLM Key 未配置，live 供应商复验仍保持 NOT RUN，不用 mock 结果冒充真实模型结果。
+
+### 2.32 R6：模型 live 失分不能自动归罪 production，holdout 也不能调到绿
+
+- **我让 AI 做的事**：先按源码和契约设计动态 data/KB variant、独立 oracle、自然中文 paraphrase、hybrid/version/injection/conflict、多轮 session 与 final holdout，再把每个真实 HTTP 失败拆成“oracle/测试构造、production trace、模型语义”三类。
+- **一个真实生产缺陷**：新文档已经被 retrieve 命中，但短文档的低 BM25 分数在 citation 之后触发二次澄清。`22c386c` 红测试确认是回答器闸门问题，`112ef96` 做了通用修复；没有为动态 doc ID 写分支。
+- **另一个真实生产缺陷**：模型 claim 与同文档中另一个数字所在 chunk 漂移。`17af227` 先以 RED 固定，`5649638` 增加 claim-aware quote，`72ca5e8` 对 unsupported numbers 做一次通用 citation reselect；73 条 targeted 测试回归通过。
+- **AI 的错误倾向**：看到最终 public live 72/100，很容易建议继续放宽拒答闸或增加题号词表；但逐题 trace 显示文档/版本/混合失分是模型漏答、拒答或引用不足，没有新的确定性 production RED。我没有把模型随机性伪装成“代码已修好”。
+- **holdout 的约束**：fresh seed `1087657` 的 mock 3/3，但 live 的“这月份 S98 的流水有多少？”被模型拒答，导致 live 2/3。它没有暴露 code/oracle 缺陷，因此不反复运行同一个 holdout 调参；最终文档如实记录剩余风险。
+- **额外发现**：全量回归第一次在 Windows 上有评测边界失败。一个是空闲端口连接建立超时被 P11 当作服务 hang，另一个是超大响应在 server reset 后掩盖了 MB 限制；`718d046` 修复评测工具边界，`14dbbdb` 修复 regression wrapper 的 GBK checkmark 输出。它们不是业务模型 bug，但真实回归才暴露了它们。
+
+这轮最重要的判断仍然由我自己做：**分数是观测，不是根因；holdout 是审计，不是待优化的目标函数**。只有 RED、trace、独立 oracle 三者能把责任指向 production，才允许改核心逻辑。

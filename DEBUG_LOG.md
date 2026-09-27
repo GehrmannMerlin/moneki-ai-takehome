@@ -1041,3 +1041,34 @@ def content_key(kb_dir: Path) -> str:
 - 每条缺陷在**修复落地**时才填「修复」与红证据；未落地的写"待 PX"。
 - 红证据必须是真实的运行输出（命令 + 结果），不是"应该会红"的推理。
 - 猜错后排除掉的假设也写进「假设」一栏——现场调试环节看的是定位方法，不是运气。
+
+---
+
+## 缺陷 #70：新文档的短 chunk 已命中，却在回答阶段被低分闸门二次澄清（R6）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | R6 harness 在运行前创建一个完全陌生的 KB 文档并完成 rebuild/retrieve；mock trace 已有可信 citation，但 `_answer_doc` 仍因为短文档的 BM25 分数低于 `CLARIFY_SCORE` 而返回澄清，真实 `/api/chat` 的 new-document E2E 因此不可达。 |
+| **根因** | 回答器把“已经选出并可验证的 citation”与“检索分数是否达到旧的泛化阈值”重复当成同一闸门；短而精确的新文档容易词面分数低，但并不代表没有证据。 |
+| **RED / 修复** | `22c386c` 提交新文档 HTTP E2E 红测试；`112ef96` 移除 citation 已选中后的错误二次澄清，只保留可信 citation/证据作为回答前提。 |
+| **GREEN** | R6 new-document reachability、R6 deterministic tests、`pytest tests/generalization` 与 `pytest tests` 均回归通过；修复不识别固定文档 ID，也不改变无证据问题的拒答路径。 |
+
+## 缺陷 #71：答案 claim 与 citation chunk 漂移，最终校验可能拿到同文档的错误数字（R6）
+
+| 项 | 内容 |
+|---|---|
+| **现象** | R6 构造一个同一文档/相邻 chunk 同时包含多个数字的场景。模型回答的事实 claim 是数字 B，但初始检索 query 只把数字 A 的 chunk 排在前面；`citation_selected` 因而引用了错误摘句，repair 轮仍可能无法让引用与 claim 对齐。 |
+| **根因** | citation 选择只使用原始问题与检索结果的词面相关性，没有把最终答案 claim（尤其是待校验数字）作为选择信号；文档级正确不等于 chunk 级 quote 正确。 |
+| **RED / 修复** | `17af227` 先提交 `claim_text` 缺失的 RED 测试；`5649638` 让 chunk/quote 选择绑定 query + claim terms；`72ca5e8` 在 final validation 发现 unsupported numbers 时，用未支持数字重新选择 citation，再执行最多一次 bounded repair。 |
+| **GREEN** | 73 条 targeted RAG/live/citation tests 通过；最终公开 live 的 metrics/retrieval/data 仍全部通过，citation 仍只来自本轮真实检索 receipt。 |
+
+R6 的真实 DeepSeek 文档/版本/混合失分没有追加为 production 缺陷：逐题 trace 显示它们是
+模型漏答、拒答、as-of 语义未稳定传递或引用不足；在没有新的确定性 RED 证据前，不为了 live
+分数把系统改成题号/数字特例。
+
+## R6 评测基础设施边界（不计 production 问答缺陷）
+
+- `718d046`：Windows 空闲端口的 `URLError(…timed out)` 是连接不可达，不应让 P11 声称服务 hang；同时按 `Content-Length` 在大响应读体前拒绝，避免 server-side reset 掩盖“超过 2 MB”。
+- `14dbbdb`：Windows GBK console 无法编码回归脚本的 checkmark，改为 ASCII `[OK]/[WARN]`；`regression.py --skip-tests` 随后以 100/100、exit code 0 结束。
+
+这两项只提高评测工具的跨平台可观测性与边界稳健性，不改变 public evaluator 的评分语义。

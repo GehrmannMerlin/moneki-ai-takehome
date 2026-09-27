@@ -1,7 +1,8 @@
 # 演示脚本
 
 一次混合问题从提问到回答的完整链路，以及调试面板怎么用。
-**下面所有内容都是在本机真实跑出来的**（`llm_mode=mock`，无 Key 降级模式），不是示意。
+第 1–4 节是本机真实跑出的 mock 降级演示（无 Key）；第 5 节补充 R6 动态变体与真实
+`deepseek-flash` 验证摘要，不把两种运行模式混称。
 
 - 录屏时按第 1–4 节的顺序走，全程约 2 分钟。
 - 第 5 节是"怎么证明这些不是编的"——只用公开题库就能复现。
@@ -356,3 +357,70 @@ print(service.sessions.load_state("demo-r5", service.context_epoch).to_dict())
 
 Live 模式的 prompt 只包含本轮 Plan 与上述结构化 state，不包含上一轮 assistant 文本。
 因此即使 transcript 中有旧答案，模型仍必须为当前轮重新调用工具取得数字。
+
+---
+
+## 5. Final R6：动态变体与新文档现场演练
+
+R6 的演示不依赖公开 `S01/P06` 或固定答案。命令会在独立临时根目录生成新的 SQLite、
+知识库和 `VAR_DIR`，自动 rebuild、启动服务并通过真实 HTTP 提问；原始报告目录已加入
+`.gitignore`。
+
+```powershell
+cd <repository-root>
+& starter/.venv/Scripts/python.exe starter/scripts/r6_hidden_stress.py `
+  --seed 987654 --family entities --kb-family hybrid --mode mock `
+  --holdout --out eval/r6_holdout --timeout 120
+```
+
+本轮真实使用过的新自然语言问题形状包括：
+
+> `2026 年 7 月 S91 的销量是多少？`
+
+以及同一个 session 的自然追问：
+
+> `营业额呢？` → `那订单数呢？`
+
+期望值由生成数据库的独立 SQL oracle 得出；断言检查 `answer_type`、当前轮
+`data_evidence`、动态 entity、trace id 与 `ConversationState`，不比较模型 prose 的固定
+字节。另一个演练在运行前创建陌生 KB 文档，完整链路是：
+
+```text
+new document
+  ↓
+rebuild / build_manifest fingerprint
+  ↓
+index metadata / retrieve
+  ↓
+KnowledgeReceipt
+  ↓
+citation_selected 或 citation_rejected
+  ↓
+final_validation
+  ↓
+answer + trace
+```
+
+### 5.1 现场调试顺序
+
+评委给出一个新问题时，按以下顺序打开 trace，避免先凭回答猜根因：
+
+1. `health`：确认 data/KB fingerprint、epoch、文档数和当前 `llm_mode`。
+2. `Plan`：确认 intent、时间窗、实体、`as_of` 与 tool policy。
+3. `ConversationState`：确认本轮是否继承了正确的 metric/entity/window，以及 epoch 是否有效。
+4. `ToolReceipt`：确认 SQL/tool call 的 scope、结果与 receipt 是否来自本轮。
+5. `retrieval_scope`：确认检索是否带了结构化 as-of、门店/时间范围，且没有跨 session 串线。
+6. `KnowledgeReceipt`：确认 source authority、sanitize 状态、版本和原始 chunk provenance。
+7. `citation_selected/rejected`：确认 quote 是本轮真实检索到的连续片段，并覆盖最终 claim。
+8. `final_validation`：确认数字/事实校验、bounded repair 次数与最终 refusal/answer 决策。
+
+这一顺序同时适用于 mock 和 live；live 只额外观察模型是否正确消费这些结构化边界。
+
+### 5.2 Final R6 真实结果摘要
+
+- 官方 public mock：**100/100**。
+- `deepseek-flash` public live：**72/100**；extra：**23/28**。这是当前真实结果，不把历史
+  早期 100/100 live 复评当作当前稳定保证。
+- R6 main live variant：3/3 单轮、2/2 多轮；fresh holdout `1087657`：mock 3/3，live
+  2/3 单轮、2/2 多轮。唯一 holdout live 失分是模型对“流水”这一同义表达选择拒答。
+- fake gateway preflight：P1–P14 全部通过；真实 key 只记录为 `configured`，不在演示中打印。

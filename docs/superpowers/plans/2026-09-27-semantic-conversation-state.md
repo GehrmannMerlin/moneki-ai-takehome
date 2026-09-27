@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11-compatible production code, dataclasses, SQLite, pytest, FastAPI service, existing mock/live engines and R1–R4 receipt/trace infrastructure.
 
-**Spec:** `C:\Users\韩吉衍\.codex\attachments\68e7f83e-75f6-4a3f-a6c3-a3d2f45eaad0\已粘贴的文本.txt`
+**Spec:** the user-provided R5 specification attachment (kept outside the repository)
 
 ## Global Constraints
 

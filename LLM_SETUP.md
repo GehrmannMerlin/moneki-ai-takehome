@@ -435,7 +435,9 @@ Git Bash 改写 `/ds-gw` 前缀——在 `preflight_driver_r4.py` 里已经固�
 ## 8. 已知限制
 清楚但还没解决的，一并写在这里。
 
-1. **真实 Key 已接入（2026-09-26），live 终评 100.00 / 100 + 28.00 / 28**（`EVAL_REPORT.md` §6）。
+1. **历史记录**：真实 Key 接入后的早期 live 复评曾为 100.00 / 100 + 28.00 / 28（`EVAL_REPORT.md` §6）。
+   这不是当前 R6 的最终 live 结论；R6 在最终代码上重新执行的 public live 为 72.00 / 100，
+   extra live 为 23.00 / 28，完整波动与失分题见 `EVAL_REPORT.md` Final R6。
    首评 87.50 暴露的六个失分根因已全部定位并修复（`DEBUG_LOG.md` #27–#32，红测试先提交）：
    live 引擎的 `data_evidence` 不做尺寸收口（4 题，回答本身全对）；
    估算数字纪律未传导给模型（H02，把"大概 150 份"写进了解释）；
@@ -483,11 +485,10 @@ Git Bash 改写 `/ds-gw` 前缀——在 `preflight_driver_r4.py` 里已经固�
        未验证的情况下引入新的误判）。两个缺口都只在"完全没提到其他指标"时才影响
        到答案形状，公开题库与泛化套件均为绿。
 
-12. **R5 当前 live 状态**：本机当前没有配置 `LLM_API_KEY`，所以本轮 targeted
-    DeepSeek multi-turn 与 official live 评测均为 **NOT RUN**。本文件第 8 节前面关于
-    R4 历史 live 评测的记录仍是历史证据，不应解释成 R5 本机已重新接入真实 Key；R5
-    当前可确认的是 public mock 100.00、preflight P1–P14 全过，以及 no-key mock 管线
-    的结构化会话状态回归。
+12. **R5 历史状态说明**：本节早期版本曾记录“当前没有配置 `LLM_API_KEY`，所以 targeted
+    live NOT RUN”；该记录保留作为当时的时间快照。R6 已在当前进程临时配置真实环境变量，
+    完成 `deepseek-flash` public/extra/selected multi-turn/injection/version/holdout 验证。
+    当前最终 live 分数与波动不要与本节早期 NOT RUN 快照混读。
 
 ### 7.8 泛化 R5：Live 只接收结构化会话状态
 
@@ -509,3 +510,56 @@ assistant 的完整答案不进入 prompt，因此旧轮次的数字不会被模
 R5 本机验证：`pytest tests/generalization/test_conversation_state.py -q` 为 **18 passed**，
 `pytest tests/generalization` 为 **155 passed**；真实 live 评测因未配置
 `LLM_API_KEY` 仍为 **NOT RUN**。
+
+---
+
+## Final R6：真实 DeepSeek 与协议边界复验
+
+以下是当前最终状态，历史章节中的 `NOT RUN` 仅表示它们各自记录时刻的环境，不是当前
+结论。模型固定为 `deepseek-flash`；`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 只在
+运行进程环境中配置，文档、trace、Git 与报告只记录 `LLM_API_KEY: configured`。
+
+### 9.1 Preflight
+
+使用 `eval/preflight_driver_r4.py` 驱动 fake DeepSeek gateway，最终 **P1–P14 全部
+PASS**。证据包括 60 次 POST、44 个 tool calls、32 次 HTTP 200 问答；P11 最慢 hang
+约 121.44 秒，仍在 `/api/chat` 的 180 秒整体预算内。P7 的 reasoning/tool round-trip、
+P10 的 reasoning 不外泄、P12 的 `llm_mode=live` 与 P14 的 keep-alive/comment 行为均
+通过。原始报告目录 `eval/_r4_preflight/` 被忽略，不包含真实 Authorization 值。
+
+### 9.2 Real model runs
+
+| 运行 | 结果 | 说明 |
+|---|---:|---|
+| 官方 `public_questions.jsonl` | **72.00 / 100，43/55** | median 0.078s，max 37.937s；稳定通过 metrics/retrieval/data/refusal/health |
+| `extra_questions.jsonl` | **23.00 / 28，9/12** | self-authored 扩展，不是官方分数；median 5.812s，max 28.016s |
+| R6 generated main variant | **3/3 单轮 + 2/2 多轮** | 动态实体、hybrid、自然追问、session isolation |
+| R6 fresh holdout `1087657` | **2/3 单轮 + 2/2 多轮** | 唯一单轮失败是“流水”同义表达被模型拒答；mock 同案通过 |
+
+public live 未通过 `C01,C04,C06,V01,V02,V03,H01,H02,H05,H06,T02,S01`；extra 未通过
+`X05,X06,X08`。这些都保留在本地 ignored JSON 报告的结构化检查中，未把 assistant raw
+正文复制进仓库。此前一次最终代码附近的 public live 为 78/100，当前为 72/100；这说明
+真实模型回答有随机性，不能用一次 100 分替代稳定性分析。
+
+### 9.3 安全与请求审计
+
+R6 injection 变体的 attack 只存在于生成 source document；`retrieve_for_model` 与
+`FactLedger.model_projection` 会移除指令型文本，citation 仍绑定本轮检索 chunk。R6
+报告检查 raw source contains attack、model projection 不含攻击、answer/citation 不含
+固定攻击数字三件事。任何 proxy/traffic 调试文件都在 `.gitignore` 中，不能作为交付物。
+
+### 9.4 运行方式（不打印 secret）
+
+```powershell
+# 由调用方在当前进程临时设置三个变量；不要把真实值写进脚本、.env 或 shell history。
+$env:LLM_BASE_URL = "https://api.deepseek.com"
+$env:LLM_MODEL = "deepseek-flash"
+# LLM_API_KEY 由安全的当前会话注入；只检查是否 configured，不 echo 值。
+
+& .venv/Scripts/python.exe -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8000
+python eval/run_eval.py --base-url http://127.0.0.1:8000 `
+  --questions eval/public_questions.jsonl --out eval/r6_live_public
+```
+
+完成后只把分数、类别、latency、commit 与 `configured` 状态写入报告；不要把 key、
+`Authorization` header 或完整 traffic log 贴进 issue、Markdown 或 Git。

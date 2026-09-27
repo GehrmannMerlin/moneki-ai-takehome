@@ -3,15 +3,17 @@
 一家 5 门店连锁餐饮品牌的经营看板，加一个能同时查销售数据库和公司知识库的 AI 助手。
 系统的"今天"固定为 **2026-09-01**，数据区间 **2026-05-01 ~ 2026-08-31**。
 
-> **当前进度：P0–P5 全部完成。**
-> 公开题库得分 **17.00 → 42.50 → 50.00 → 100.00 / 100（55 题全绿）**
-> （十类全部满分，mock 降级模式）；
-> **配置真实 DeepSeek Key 后（live 模式）终评 100.00 / 100 + 自补题库 28.00 / 28**。
-> 首评 87.50，暴露的六个缺陷（全部在"模型不知道这套系统的使用约定"上）已逐个
-> 红测试先提交地修复，复评满分（见 [`EVAL_REPORT.md`](EVAL_REPORT.md) §6 与
-> [`DEBUG_LOG.md`](DEBUG_LOG.md) #27–#32）。
-> 大模型接入的 14 项预检 **P1–P14 全部通过**（见 [`LLM_SETUP.md`](LLM_SETUP.md) §7），
-> 真实 Key 按 [`LLM_SETUP.md`](LLM_SETUP.md) §3 三步切换、零代码改动，实测见其 §7.4。
+> **当前状态：R1–R6 完成，项目处于 submission-ready 状态。**
+> 官方公开题库 mock **100.00 / 100（55/55）**；最终真实 DeepSeek `deepseek-flash`
+> 公开 live **72.00 / 100（43/55）**，自补 extra live **23.00 / 28（9/12）**。
+> 真实模型分数存在可复现的语义波动：此前同一最终代码附近的公开 live 曾达 **78.00 / 100**；
+> 现阶段稳定通过的是指标、检索、数据、拒答与健康边界，文档/版本/混合回答仍有模型语义缺口，
+> 没有把 mock 分数冒充 live 分数。详见 [`EVAL_REPORT.md`](EVAL_REPORT.md) 的 Final R6 节。
+> 动态 R6 harness 覆盖 4 个数据 family、7 个 KB family、独立 SQLite/文档 oracle、自然语言
+> paraphrase、版本/冲突/injection、新文档 E2E 与多轮 session；mock holdout 全绿，真实 holdout
+> 的单轮 2/3 + 多轮全通过，唯一 live 失分是模型拒答“流水”这一同义表达，详见报告。
+> 大模型接入的 14 项预检 **P1–P14 全部通过**（见 [`LLM_SETUP.md`](LLM_SETUP.md) Final R6），
+> API key 只在当前进程环境变量中临时注入，仓库、报告、trace 与 Git 历史均不保存 key。
 > 起服务后开 `http://localhost:8000` 即见看板（P4 dist 已入库，零构建）。
 > 各阶段实际完成情况见文末《进度》一节；
 > 接手项目里原有 RAG 服务的缺陷分析与基线得分见 [`DEBUG_LOG.md`](DEBUG_LOG.md) 与 [`EVAL_REPORT.md`](EVAL_REPORT.md)。
@@ -783,3 +785,37 @@ Durable Session State
 
 其中 Transcript 只用于展示与诊断，ConversationState 只用于语义连续性，Plan 是当前
 轮规划权威，Tool/Knowledge Receipt 是当前轮事实权威。
+
+## Final R6：隐藏风格压力与真实模型验证
+
+这一节是当前交付状态的入口；前面 P0–P5 小节保留各阶段的历史快照，不应与当前
+真实模型结果混读。代码基线为 R6 production source SHA `14dbbdb`（之后的文档/交付
+提交只改变说明与审计材料）。
+
+| 检查 | 当前结果 |
+|---|---|
+| Python | `3.12.6`（最终虚拟环境） |
+| 官方 public mock | **100.00 / 100，55/55** |
+| 官方 public live | **72.00 / 100，43/55**，`deepseek-flash` |
+| Self-authored extra live | **23.00 / 28，9/12**；不是官方分数 |
+| R6 deterministic tests | 17 个 R6/引用相关断言通过；全 generalization **171 passed** |
+| `pytest starter/tests` | **406 passed，9 warnings**；warnings 为既有 Windows 子进程 GBK 与依赖弃用警告 |
+| Full `pytest -q` | **666 passed，9 warnings，124 subtests** |
+| `swap_check.py` | 通过；变体数据、KB-901、新引用、缓存指纹均验证 |
+| DeepSeek preflight | P1–P14 全部通过；44 tool calls，60 POST calls，最长 hang 约 121.44s |
+| R6 mock holdout | 新 seed `1087657` 对应 holdout **3/3 单轮 + 2/2 多轮** |
+| R6 live holdout | 主变体 `987654` **3/3 + 2/2 多轮**；holdout `1087657` **2/3 + 2/2 多轮** |
+
+R6 的生成器不修改仓库的 `data/` 或 `knowledge_base/`：每次运行在独立临时根目录创建
+SQLite、文档与 `VAR_DIR`，从变体 source 直接计算 data oracle，从实际 source document
+计算 KB oracle，然后通过 `/api/retrieve`、`/api/chat`、`/api/trace` 验证真实 HTTP 路径。
+运行后的原始报告、traffic、临时数据库与 variant 目录均被 `.gitignore` 排除。
+
+一个实际的新问题是：`2026 年 7 月 S91 的销量是多少？`，其期望值来自生成 SQLite
+而不是固定公开答案；真实 live 变体还验证了“营业额呢？”与“那订单数呢？”的自然追问、
+不同 session 的门店隔离、当前/历史版本、来源冲突、prompt injection 与新增陌生文档。
+
+现场定位 R6 问题时按 `DEMO.md` 的短序列走：`health` → `Plan` → `ConversationState`
+→ `ToolReceipt` → `retrieval_scope` → `KnowledgeReceipt` → `citation_selected/rejected`
+→ `final_validation`。最终真实模型的未通过项是模型回答质量风险，不是隐藏评测保证；未知的
+官方 hidden set 仍需评委运行。
