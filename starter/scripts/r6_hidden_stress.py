@@ -108,6 +108,39 @@ class R6Report:
 
 
 @dataclass(frozen=True)
+class ScenarioTurn:
+    """One natural-language turn and its semantic contract."""
+
+    question: str
+    expected: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """A bounded, stateful conversation authored from generated inputs."""
+
+    name: str
+    session_id: str
+    turns: list[ScenarioTurn]
+
+
+@dataclass
+class ScenarioTurnResult:
+    question: str
+    response: dict[str, Any]
+    trace: dict[str, Any]
+    trace_state: dict[str, Any]
+
+
+@dataclass
+class ScenarioResult:
+    name: str
+    passed: bool
+    turns: list[ScenarioTurnResult]
+    failures: list[str]
+
+
+@dataclass(frozen=True)
 class BuildSnapshot:
     data: DataVariant
     kb: KBVariant
@@ -246,6 +279,20 @@ def make_data_variant(root: Path, *, seed: int, family: str = "values") -> DataV
     data_dir = root / "data"
     db_path = data_dir / "pos.db"
     data_dir.mkdir(parents=True, exist_ok=True)
+    # A single generated root may intentionally be reused to simulate a data
+    # refresh.  Start from a fresh source database so the variant is a true
+    # function of (root, seed, family), rather than the previous schema state.
+    if db_path.exists():
+        for attempt in range(50):
+            try:
+                db_path.unlink()
+                break
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                # Windows may release a just-terminated subprocess's SQLite
+                # handle a few milliseconds after wait() observes its exit.
+                time.sleep(0.1)
     store_id, product_id = _generated_ids(seed)
     base = 23 + abs(seed) % 17
     rows = [
@@ -280,12 +327,15 @@ def make_data_variant(root: Path, *, seed: int, family: str = "values") -> DataV
             ("R6-%d-zero" % seed, "2026-07-05", store_id, product_id, "1", "0.00", "现金"),
         ])
         end = "2026-07-05"
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         conn.executescript(POS_SCHEMA)
         conn.executemany("INSERT INTO stores VALUES (?, ?, ?, ?)", stores)
         conn.executemany("INSERT INTO products VALUES (?, ?, ?, ?)", products)
         conn.executemany("INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
         conn.commit()
+    finally:
+        conn.close()
     return DataVariant(
         root=root,
         data_dir=data_dir,
@@ -317,11 +367,17 @@ def data_oracle(
         clauses.append("product_id = ?")
         params.append(product_id)
     where = " AND ".join(clauses)
-    with sqlite3.connect(Path(db_path)) as conn:
+    conn = sqlite3.connect(Path(db_path))
+    try:
         rows = conn.execute(
             "SELECT order_id, qty, amount FROM sales WHERE " + where,
             params,
         ).fetchall()
+    finally:
+        # sqlite3.Connection.__exit__ commits/rolls back but does not close the
+        # handle.  Explicitly close it so a completed oracle call cannot keep a
+        # Windows source database locked during the next epoch rebuild.
+        conn.close()
     amounts = [float(row[2]) for row in rows]
     qty = sum(int(float(row[1])) for row in rows)
     orders = len({row[0] for row in rows})
@@ -692,3 +748,135 @@ def run_matrix(
         "all_authored": len(question_matrix(seed=seed, data=data, kb=kb)),
     }
     return R6Report(mode=mode, seed=seed, results=results, counts=counts, failures=failures)
+
+
+def scenario_bank(*, seed: int, data: DataVariant, kb: KBVariant) -> list[Scenario]:
+    """Return natural multi-turn probes with contracts derived from the oracle.
+
+    The scenario assertions deliberately inspect answer type, source trace, and
+    resolved state.  They never compare the assistant's prose byte-for-byte;
+    phrasing is allowed to vary between mock and live engines.
+    """
+    scoped = data_oracle(
+        data.db_path,
+        start=data.start,
+        end=data.end,
+        store_id=data.store_id,
+    )
+    second_store = "S%02d" % (int(data.store_id[1:]) + 1)
+    return [
+        Scenario(
+            name="metric-change",
+            session_id="r6-scenario-%d" % seed,
+            turns=[
+                ScenarioTurn(
+                    question="2026 年 7 月 %s 的销量是多少？" % data.store_id,
+                    expected={
+                        "answer_type": "data",
+                        "numbers": [scoped["qty"]],
+                        "evidence_numbers": [scoped["qty"]],
+                        "needs_data": True,
+                    },
+                ),
+                ScenarioTurn(
+                    question="营业额呢？",
+                    expected={
+                        "answer_type": "data",
+                        "numbers": [scoped["net_revenue"]],
+                        "evidence_numbers": [scoped["net_revenue"]],
+                        "needs_data": True,
+                    },
+                ),
+                ScenarioTurn(
+                    question="那订单数呢？",
+                    expected={
+                        "answer_type": "data",
+                        "numbers": [scoped["orders"]],
+                        "evidence_numbers": [scoped["orders"]],
+                        "needs_data": True,
+                    },
+                ),
+            ],
+        ),
+        Scenario(
+            name="store-isolation",
+            session_id="r6-scenario-isolation-%d" % seed,
+            turns=[
+                ScenarioTurn(
+                    question="2026 年 7 月 %s 的净营业额是多少？" % data.store_id,
+                    expected={"answer_type": "data", "needs_data": True},
+                ),
+                ScenarioTurn(
+                    question="换成 %s 呢？" % second_store,
+                    expected={"answer_type": "data", "needs_data": True},
+                ),
+            ],
+        ),
+    ]
+
+
+def _trace_state(trace: dict[str, Any]) -> dict[str, Any]:
+    """Extract the last semantic state emitted by the service trace."""
+    for step in reversed(trace.get("steps", [])):
+        if step.get("step") in {"session_state_after", "session_state_before"}:
+            detail = step.get("detail")
+            return dict(detail) if isinstance(detail, dict) else {}
+    return {}
+
+
+def run_scenario(service: ServiceHandle, scenario: Scenario) -> ScenarioResult:
+    """Run one conversation over one session and retain semantic observations."""
+    turns: list[ScenarioTurnResult] = []
+    failures: list[str] = []
+    for index, turn in enumerate(scenario.turns):
+        try:
+            response = service.post(
+                "/api/chat",
+                {"session_id": scenario.session_id, "question": turn.question},
+            )
+            trace = service.trace(response["trace_id"])
+            assert_case_contract(response, turn.expected)
+            state = _trace_state(trace)
+            if response.get("answer_type") == "data" and not state:
+                raise AssertionError("data turn did not emit semantic session state")
+            turns.append(ScenarioTurnResult(turn.question, response, trace, state))
+        except Exception as exc:  # noqa: BLE001 - retain all turn failures
+            failures.append("turn %d: %s: %s" % (index + 1, type(exc).__name__, exc))
+            # Keep the shape stable for callers that want to inspect progress.
+            turns.append(ScenarioTurnResult(turn.question, {}, {}, {}))
+    return ScenarioResult(scenario.name, not failures, turns, failures)
+
+
+def run_interleaved_sessions(
+    service: ServiceHandle,
+    sessions: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Interleave turns from multiple sessions and return trace states by SID."""
+    records: dict[str, list[dict[str, Any]]] = {session_id: [] for session_id in sessions}
+    failures: list[str] = []
+    max_turns = max((len(questions) for questions in sessions.values()), default=0)
+    for index in range(max_turns):
+        for session_id, questions in sessions.items():
+            if index >= len(questions):
+                continue
+            try:
+                response = service.post(
+                    "/api/chat",
+                    {"session_id": session_id, "question": questions[index]},
+                )
+                trace = service.trace(response["trace_id"])
+                state = _trace_state(trace)
+                if response.get("answer_type") != "data":
+                    raise AssertionError("turn %d returned %s" % (index + 1, response.get("answer_type")))
+                records[session_id].append({
+                    "response": response,
+                    "trace": trace,
+                    "state": state,
+                })
+            except Exception as exc:  # noqa: BLE001 - keep other sessions running
+                failures.append("%s turn %d: %s: %s" % (
+                    session_id, index + 1, type(exc).__name__, exc
+                ))
+                records[session_id].append({"response": {}, "trace": {}, "state": {}})
+    records["failures"] = failures
+    return records

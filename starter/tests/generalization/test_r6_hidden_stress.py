@@ -303,3 +303,77 @@ def test_version_and_source_authority_cases_use_generated_documents(tmp_path):
     assert "99" not in authoritative["answer"]
     assert "12" in authoritative["answer"]
     assert authoritative["citations"]
+
+
+def test_natural_multi_turn_scenario_preserves_semantics_not_answer_text(tmp_path):
+    root = tmp_path / "multi-turn"
+    data = r6.make_data_variant(root, seed=9191, family="entities")
+    kb = r6.make_kb_variant(root, seed=9191, family="edit_add")
+    snapshot = r6.rebuild_variant(data, kb)
+
+    with r6.ServiceHandle(snapshot.env, port=r6.free_port()) as service:
+        scenario = next(
+            item for item in r6.scenario_bank(seed=9191, data=data, kb=kb)
+            if item.name == "metric-change"
+        )
+        result = r6.run_scenario(service, scenario)
+
+    assert result.passed, result.failures
+    assert len(result.turns) >= 3
+    assert result.turns[0].response["answer_type"] == "data"
+    assert result.turns[1].response["answer_type"] == "data"
+    assert result.turns[1].trace_state["metric"] == "net_revenue"
+    assert result.turns[1].trace_state["store_id"] == data.store_id
+
+
+def test_interleaved_sessions_do_not_cross_store_scope(tmp_path):
+    root = tmp_path / "sessions"
+    data = r6.make_data_variant(root, seed=9192, family="entities")
+    kb = r6.make_kb_variant(root, seed=9192, family="edit_add")
+    snapshot = r6.rebuild_variant(data, kb)
+
+    with r6.ServiceHandle(snapshot.env, port=r6.free_port()) as service:
+        result = r6.run_interleaved_sessions(
+            service,
+            {
+                "session-a": ["2026 年 7 月 %s 的净营业额是多少？" % data.store_id, "订单数呢？"],
+                "session-b": ["2026 年 7 月 %s 的净营业额是多少？" % ("S%02d" % (int(data.store_id[1:]) + 1)), "订单数呢？"],
+            },
+        )
+
+    assert result["failures"] == []
+    assert result["session-a"][1]["state"]["store_id"] == data.store_id
+    assert result["session-b"][1]["state"]["store_id"] != data.store_id
+
+
+def test_dataset_epoch_invalidates_same_session_over_http(tmp_path):
+    root = tmp_path / "epoch"
+    data_a = r6.make_data_variant(root, seed=9193, family="values")
+    kb = r6.make_kb_variant(root, seed=9193, family="edit_add")
+    first = r6.rebuild_variant(data_a, kb)
+
+    with r6.ServiceHandle(first.env, port=r6.free_port()) as service:
+        old = service.post(
+            "/api/chat",
+            {"session_id": "same-session", "question": "2026 年 7 月 %s 的净营业额是多少？" % data_a.store_id},
+        )
+        old_value = r6.data_oracle(
+            data_a.db_path, start=data_a.start, end=data_a.end,
+            store_id=data_a.store_id, product_id=data_a.product_id,
+        )["net_revenue"]
+
+    data_b = r6.make_data_variant(root, seed=9194, family="values")
+    second = r6.rebuild_variant(data_b, kb)
+    with r6.ServiceHandle(second.env, port=r6.free_port()) as service:
+        fresh = service.post(
+            "/api/chat",
+            {"session_id": "same-session", "question": "2026 年 7 月 %s 的净营业额是多少？" % data_b.store_id},
+        )
+        trace = service.trace(fresh["trace_id"])
+
+    assert old_value != r6.data_oracle(
+        data_b.db_path, start=data_b.start, end=data_b.end,
+        store_id=data_b.store_id, product_id=data_b.product_id,
+    )["net_revenue"]
+    assert str(old_value) not in fresh["answer"]
+    assert any(step.get("step") == "session_state_invalidated" for step in trace["steps"])
