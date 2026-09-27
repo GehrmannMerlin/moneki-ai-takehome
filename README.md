@@ -754,3 +754,32 @@ R5 验证记录：`pytest tests/generalization` 为 **154 passed**，其中新�
 `tests/generalization/test_conversation_state.py` 为 **17 passed**。完整测试与官方
 mock 评测的最终结果以 `EVAL_REPORT.md` §11 为准；当前环境使用 Python 3.11.8，仓库
 要求为 Python 3.12+，因此完整测试中的版本门槛失败应按环境限制单独记录。
+
+R5 的 authority 流程图：
+
+```text
+Question
+  ↓
+Guard
+  ↓
+ConversationState.load(epoch)
+  ↓
+Conversation Resolver
+  ↓
+Canonical Planner
+  ↓
+PlanToolPolicy / Trusted Retrieval
+  ↓
+Fact / Knowledge Receipts
+  ↓
+Answerer 或 LiveEngine
+  ↓
+Finaliser
+  ↓
+ContextPatch / State Transition
+  ↓
+Durable Session State
+```
+
+其中 Transcript 只用于展示与诊断，ConversationState 只用于语义连续性，Plan 是当前
+轮规划权威，Tool/Knowledge Receipt 是当前轮事实权威。

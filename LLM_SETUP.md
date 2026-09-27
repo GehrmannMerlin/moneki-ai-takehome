@@ -121,6 +121,12 @@ live 模式还多了一层**事实溯源**（泛化 R2 引入，`steps` 数组�
 `explicit` / `inherited` / `derived` / `default` / `none`），用来在调试面板里回答
 "这个门店是用户说的、还是上一轮继承的、还是根本没解析出来"。参考 `DEMO.md` §4。
 
+R5 的跨用户 turn 请求形状已经改变：当前模型请求包含本轮 Plan 与结构化
+`ConversationState`，不再追加前 3 轮的 user/assistant 自然语言消息。这样上一轮
+assistant 的数字不会成为当前事实来源；但同一个 `/api/chat` 内，模型发出的 assistant
+tool-call 消息、`reasoning_content` 和随后回传的 `role=tool` 消息仍按 DeepSeek 协议原样
+保留。R5 preflight P13 已验证 18 次多轮请求的 `reasoning_content` 回传。
+
 于是"模型为什么知道这个数字"可以在 trace 里一条线看下来：
 
 ```text
@@ -476,6 +482,12 @@ Git Bash 改写 `/ds-gw` 前缀——在 `preflight_driver_r4.py` 里已经固�
        不会被识别成排行意图（这是**既有**行为，本轮没有往词表里加词——避免在
        未验证的情况下引入新的误判）。两个缺口都只在"完全没提到其他指标"时才影响
        到答案形状，公开题库与泛化套件均为绿。
+
+12. **R5 当前 live 状态**：本机当前没有配置 `LLM_API_KEY`，所以本轮 targeted
+    DeepSeek multi-turn 与 official live 评测均为 **NOT RUN**。本文件第 8 节前面关于
+    R4 历史 live 评测的记录仍是历史证据，不应解释成 R5 本机已重新接入真实 Key；R5
+    当前可确认的是 public mock 100.00、preflight P1–P14 全过，以及 no-key mock 管线
+    的结构化会话状态回归。
 
 ### 7.8 泛化 R5：Live 只接收结构化会话状态
 
