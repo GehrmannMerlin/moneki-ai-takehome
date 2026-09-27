@@ -23,6 +23,28 @@ RANK_WORDS = ("最高", "最多", "最好", "第一", "top", "排名", "最畅�
 CATEGORY_WORDS = ("品类", "类别", "分类", "什么类型的店", "哪类")
 STORE_WORDS = ("门店", "哪家店", "哪个店", "各店", "每家店", "分店")
 PRODUCT_RANK_WORDS = ("商品", "产品", "单品", "菜品")
+
+#: 门店/商品编号。**不能用 `\b`**：`\b` 的边界依赖 `\w`，
+#: 而中文在 Unicode 正则里也是 `\w`。于是「S05当月」「P06销量」这种
+#: 编号紧跟中文的写法一个都认不出来（真实数据里很常见）。
+#: 改成"左边不是字母数字、右边不是数字"，中文、标点、行首都算边界。
+STORE_CODE = re.compile(r"(?<![a-z0-9])s(\d{1,2})(?![0-9])")
+PRODUCT_CODE = re.compile(r"(?<![a-z0-9])p(\d{1,2})(?![0-9])")
+
+#: 「否定/反差地提到排行词」的说法。出现排行词**不等于**用户在要排行：
+#: 「不要按销量排名」「反馈最多不代表营业额最高」「并不是问谁最高」都是在
+#: **排除**排行解读。命中这些语言形状时，排行词不产生排行意图。
+_RANK_NEGATION = (
+    re.compile(r"(不要|别|不用|不必|无需).{0,10}(按|以|用|看成|理解|解释|当作).{0,8}"
+               r"(排名|排序|排行|最高|最多|最好|第一|销量|好评)"),
+    re.compile(r"(不要|别|不用).{0,12}(解释|理解|当成|看成|算).{0,8}(最高|最多|排名|排行|第一)"),
+    re.compile(r"(不等于|不代表|并不是|并非|不是).{0,10}(排名|排序|排行|第一|最高|最多|最畅销|卖得最好)"),
+    re.compile(r"(排名|排序|排行|第一|最高|最多|最畅销|卖得最好).{0,8}"
+               r"(不代表|不等于|并不是|并非|不是)"),
+)
+
+#: 分句切分：判断"这句排行话是不是被否定了"以及"哪些分句该参与指标识别"。
+_CLAUSE_SPLIT = re.compile(r"[，,。；;？?！!\n]")
 #: “为什么”的各种说法。与问句焦点用同一张表，免得两处不一致。
 WHY_WORDS = (
     "为什么", "为何", "原因", "什么原因", "怎么回事", "咋回事", "什么情况", "怎么会",
@@ -152,8 +174,8 @@ class Catalog:
     def find_store(self, text: str) -> tuple[Optional[str], Optional[str]]:
         """返回 (store_id, 未知门店编号)。问到不存在的门店时第二项非空。"""
         lowered = normalise(text)
-        for code in re.findall(r"\bs\d{1,2}\b", lowered):
-            upper = code.upper()
+        for code in STORE_CODE.findall(lowered):
+            upper = "S" + code.upper()
             if upper in self.store_ids():
                 return upper, None
             return None, upper
@@ -173,8 +195,8 @@ class Catalog:
 
     def find_product(self, text: str) -> tuple[Optional[str], Optional[str]]:
         lowered = normalise(text)
-        for code in re.findall(r"\bp\d{1,2}\b", lowered):
-            upper = code.upper()
+        for code in PRODUCT_CODE.findall(lowered):
+            upper = "P" + code.upper()
             if upper in {product["product_id"] for product in self.products}:
                 return upper, None
             return None, upper
@@ -204,6 +226,44 @@ def find_metric(text: str) -> Optional[str]:
 def has_any(text: str, words) -> bool:
     lowered = normalise(text)
     return any(normalise(word) in lowered for word in words)
+
+
+def rank_negated(text: str) -> bool:
+    """句子里出现了排行词，但它被"否定/反差"说法包住了吗。
+
+    「不要按销量排名」「反馈最多不代表营业额最高」「顾客评价最多不是问谁最高」
+    都会命中——它们**提到**排行词，恰恰是为了**排除**排行解读。
+    只出现排行词、没有任何否定形状时返回 False（真排行问题照旧）。
+    """
+    if not has_any(text, RANK_WORDS):
+        return False
+    return any(pattern.search(text or "") for pattern in _RANK_NEGATION)
+
+
+def asks_ranking(text: str) -> bool:
+    """用户是不是真的要一个排行（而不是在说"别按排行理解"）。
+
+    这是排行类意图的**唯一入口**：出现排行词 ≠ 要排行。
+    """
+    return has_any(text, RANK_WORDS) and not rank_negated(text)
+
+
+def focus_text_for_metric(text: str) -> str:
+    """取指标词时用的文本。
+
+    否定排行的那半句里常常带着被否掉的指标词（「不要按**销量**排名，只看…
+    **营业额**」），直接 `find_metric` 会取到被否掉的那个。
+    确实出现否定排行时，把带排行词的分句摘掉再取指标；
+    否则原样返回——不改变普通句子的行为。
+    """
+    if not rank_negated(text):
+        return text or ""
+    kept = [
+        clause
+        for clause in _CLAUSE_SPLIT.split(text or "")
+        if clause.strip() and not has_any(clause, RANK_WORDS)
+    ]
+    return " ".join(kept) if kept else (text or "")
 
 
 def is_destructive(text: str) -> bool:

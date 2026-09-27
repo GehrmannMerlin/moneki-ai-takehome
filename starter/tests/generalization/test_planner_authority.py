@@ -280,7 +280,7 @@ def test_two_part_no_longer_drives_answerer(synth_planner):
     import inspect
 
     from kbqa import answerer as answerer_mod
-    from kbqa import routing as routing_mod  # noqa: F401  (旧 helper 可能保留)
+    from kbqa.core import routing as routing_mod  # noqa: F401  (区间闸 helper 仍作为 Planner 内部函数存在)
 
     source = inspect.getsource(answerer_mod)
     assert "two_part" not in source, "Answerer 仍在消费 two_part"

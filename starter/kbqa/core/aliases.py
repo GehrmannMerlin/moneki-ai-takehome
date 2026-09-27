@@ -180,8 +180,11 @@ class AliasTable:
         extra: list[str] = []
         lowered = normalise(text)
         mentioned = list(self.mentions(text))
-        for code in re.findall(r"\bs\d{2}\b", lowered):
-            canonical = self.by_store_code(code)
+        # 编号识别共用 entities.STORE_CODE（不用 `\b`，否则"编号紧跟中文"漏认）。
+        from ..entities import STORE_CODE
+
+        for code in STORE_CODE.findall(lowered):
+            canonical = self.by_store_code("S" + code)
             if canonical and canonical not in mentioned:
                 mentioned.append(canonical)
         for canonical in mentioned:

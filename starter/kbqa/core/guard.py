@@ -170,7 +170,11 @@ def check(question: str, data_period: Optional[dict] = None,
     "S06 的店长是谁"会捞到 KB-033（S04 的门店档案），"员工平均工资"会捞到
     周报里一句提到"员工"的话，然后被当成有依据的答案引出去（F02/F03 就是这么红的）。
     """
-    from ..entities import CANNOT_KNOW, has_any, is_destructive, is_prompt_probe, head_clause
+    from ..entities import (
+        CANNOT_KNOW, PRODUCT_CODE, STORE_CODE, has_any, is_destructive,
+        is_prompt_probe, head_clause,
+    )
+    from .tokenizer import normalise
 
     text = (question or "").strip()
     if not text:
@@ -198,13 +202,19 @@ def _unknown_entity(text: str, known_stores: Optional[set],
 
     兼容两种写法：`S06`（门店）与 `P99`（商品）。只比**编号**，
     不看名字——"这家门店的店长是谁"里的"这家"没有编号，交给别的闸门。
+    编号识别共用 `entities.STORE_CODE` / `PRODUCT_CODE`：**不用 `\\b`**，
+    否则「S06这家店」这种编号紧跟中文的写法会被漏掉。
     """
-    codes = set(re.findall(r"\b[Ss](\d{2})\b", text))
+    from ..entities import PRODUCT_CODE, STORE_CODE
+    from .tokenizer import normalise
+
+    lowered = normalise(text)
+    codes = set(STORE_CODE.findall(lowered))
     if known_stores:
         for code in sorted(codes):
             if "S%s" % code not in known_stores:
                 return "S%s" % code
-    products = set(re.findall(r"\b[Pp](\d{2})\b", text))
+    products = set(PRODUCT_CODE.findall(lowered))
     if known_products:
         for code in sorted(products):
             if "P%s" % code not in known_products:

@@ -30,6 +30,22 @@ _MONTH_RANGE = re.compile(
 _DAY_RANGE = re.compile(r"(%s)\s*[日号]\s*%s\s*(%s)\s*[日号]" % (_NUM, _RANGE, _NUM))
 
 RELATIVE_WHOLE = ("最近", "近期", "这段时间", "整体", "总体", "目前为止", "至今", "累计", "全部时间")
+
+#: 门店/商品编号：`S91`、`P06`。识别规则与 `entities.STORE_CODE` 一致。
+_CODE = re.compile(r"(?<![A-Za-z0-9])([SPsp])(\d{1,2})(?![0-9])")
+#: 插在编号后面的分隔符。它必须**不是**空格（空格稍后会被去掉）、
+#: 也不是数字或汉字，免得参与任何正则。
+_CODE_SEP = "\x00"
+
+
+def separate_codes(text: str) -> str:
+    """在编号后面插一个分隔符，保护后面的数字不被粘进编号。
+
+    `"S91 7 月"` 去掉空格会拼成 `"S917月"`，月份正则只认到 `"917"`（不是合法月份），
+    于是 7 月整个丢掉、问题落到全区间。先隔开再处理就不会。
+    """
+    return _CODE.sub(lambda m: m.group(1) + m.group(2) + _CODE_SEP, text or "")
+
 #: 指向未来的说法：数据区间之外，只能如实说没有数据。
 RELATIVE_FUTURE = {
     "明天": 1, "后天": 2, "下周": 7, "下个星期": 7, "下星期": 7, "未来": 7,
@@ -91,7 +107,8 @@ def _clamp_day(year: int, month: int, day: int) -> date:
 def parse_time(text: str, today: date) -> TimeSpec:
     """把问句里的时间说法解析成闭区间。找不到时间就返回空的 TimeSpec。"""
     spec = TimeSpec()
-    cleaned = text.replace(" ", "")
+    # 编号要先隔开：`"S91 7 月"` 去空格后会粘成 `"S917月"`，7 月会被整个丢掉。
+    cleaned = separate_codes(text).replace(" ", "")
     year_match = _YEAR.search(cleaned)
     year = int(year_match.group(1)) if year_match else None
     if "去年" in cleaned:
