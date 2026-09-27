@@ -20,6 +20,9 @@ eval/_regression_raw/
 eval/_*_raw/
 eval/_*_check/
 eval/_*_extra/
+eval/_r4_*/
+eval/_*_service.log
+eval/_*_run.txt
 eval/_live*_doc/
 eval/report.md
 eval/__pycache__/
@@ -27,6 +30,11 @@ docs/_*.txt
 docs/_*.png
 docs/_*.html
 docs/_*.log
+
+# 本地起服务 / 跑评测时的临时日志（不是产物）
+starter/_r4_*
+starter/_*_server.log
+starter/_*_eval.txt
 
 # 根目录游离产物：用户提供的自补题库（只读输入）与不带 --out 时落地的评测报告
 /moneki_extra_hybrid_eval_bank.json

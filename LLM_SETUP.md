@@ -391,6 +391,39 @@ MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver.py
 `encoding="utf-8", errors="replace"` 即可。**"预检红了"先看脚本自己的输出解码，
 再看被测服务**——与 §7.2 那条踩坑同一个教训。
 
+### 7.7 泛化 R4 后的复跑（2026-09-27）
+
+泛化 R4 改的是**检索信任边界**：`search_kb` 现在把 Plan 的**结构化范围**
+（`as_of/store_id/historical/window/year`）注入检索，并且**进模型的文本是安全投影**
+（`source_text`/`source_dropped` 被 `FactLedger.model_projection` 摘掉）。它落在
+"发给模型的请求"上（`role=tool` 的内容形状变了），必须复跑预检确认三件事不退化：
+**只用了文档列出的顶层参数**（P4，范围是注入进 `params` 不是新增请求参数）、
+**思考内容不外泄**（P10）、**工具调用仍以 `role=tool` + `tool_call_id` 正确回传**（P7）。
+
+本轮沿用 R3 的一条命令模式（自己的输出目录，避免覆盖 R3 证据）：
+
+```bash
+# 从仓库根目录；Git Bash 需加 MSYS_NO_PATHCONV=1（见 §7.5 坑 1）
+MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver_r4.py
+```
+
+实测结论：**P1–P14 全部通过**（输出末尾 `PREFLIGHT_PASSED=True`）。报告原件
+`eval/_r4_preflight/preflight_report.md`。关键几项：
+
+| 编号 | 检查项 | 结果 | 实测说明 |
+|---|---|---|---|
+| P1 | 请求确实发到注入的 `LLM_BASE_URL`（含路径前缀） | 通过 | 共观察到 60 次 `POST /ds-gw/chat/completions`。 |
+| P4 | 只用了 DeepSeek 文档列出的顶层参数 | 通过 | **结构化检索范围注入的是工具 `params`（`role=tool`），没有新增任何请求参数**。 |
+| P7 | 工具定义规范，且每个工具调用以 `role=tool` + `tool_call_id` 回传 | 通过 | 44 个工具调用的结果都正确回传（含安全投影后的知识结果）。 |
+| P8 | 每个场景 `/api/chat` 返回 200 与字段完整 JSON | 通过 | 32 次问答全部 200 + 字段完整。 |
+| P10 | 思考内容没有漏进 `answer` / `citations` / `data_evidence` | 通过 | 32 次回答里，思考标记都没有出现在任何对外字段里。 |
+| P11 | 在时限内返回（含长时无响应场景） | 通过 | 最慢 123.59 秒（`hang` 场景 read 超时），都在 180 秒以内。 |
+| P13 | 多轮之间 `reasoning_content` 原样回传（未触发 400） | 通过 | 18 次多轮请求都原样回传了 `reasoning_content`。 |
+
+与 R3（§7.6）逐项对比**无退化**。本轮无新增踩坑（R3 记下的两个坑——Windows 保留端口、
+Git Bash 改写 `/ds-gw` 前缀——在 `preflight_driver_r4.py` 里已经固化：端口用 18801，
+脚本里自带 `--no-wait`，调用方加 `MSYS_NO_PATHCONV=1`）。
+
 ---
 
 ## 8. 已知限制
@@ -415,10 +448,14 @@ MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver.py
    结构化 refusal。旧行为（校验失败 → 交给另一套 `Answerer` 重新回答）已删除——
    它会把"模型已经答对的问题"重新答错（H069，见 `AI_USAGE.md` 2.24 与
    `DEBUG_LOG.md` #40）。数字口径与评测脚本一致（`kbqa/core/numbers.py`）。
-5. **Round 4 未完成：raw KB 文本仍会进入模型上下文。** `search_kb` 返回的
-   `results[].text` 是原文片段，模型能看到；`Hit.safe_text` 的收敛（注入过滤 /
-   来源权威分级 / citation provenance）属于后续轮次。本轮只保证"finaliser 不会
-   把安全的模型答案变成不安全答案"，**不等于**修好了 prompt injection。
+5. **检索信任边界已闭合（泛化 R4）。** `search_kb` 给模型的 `role=tool` 内容
+   现在是**安全投影**：`text` 是 sanitize 后的安全文本（通用注入识别 + 反向护栏，
+   正经公司制度不被误删）；原始来源 `source_text` / 剥掉的指令句 `source_dropped`
+   放在 receipt 里、由 `FactLedger.model_projection` 摘掉，**永不进模型上下文**。
+   引用由 `kbqa/citations.py` 从**本轮真的检索到的 chunk**生成（逐字、规范化 ≤400、
+   跳过被 sanitize 的指令句、拒绝未见文档）。公开接口 `Service.retrieve()`
+   **仍回原文**（evaluator 逐字校验对的是它）——两个接口目标相反，是刻意分开的两条路。
+   缺陷与证据见 `DEBUG_LOG.md` #52–#59。
 6. **思考模式开关未显式设置**（`deepseek-flash` 默认开启），理由见 README：
    多轮工具调用更稳，代价是更慢更贵；`reasoning_content` 只进 trace，不进 answer。
 7. **`max_tokens` 显式 4096**（契约要求不设或不小于 2048）。
@@ -426,12 +463,13 @@ MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver.py
    DeepSeek 文档列出的顶层参数之内。若你们那边有异议，删掉它不影响功能。
 9. **trace 里超过 256KB 的字段会写文件、trace 存路径**（`var/llm_payloads/`）。
    正常一轮提示词只有几 KB，不会触发。
-10. **规划权威已收敛，但工具范围策略只覆盖"取数范围"**（泛化 R3）。Planner 返回的
-    Plan 是这一轮的语义终态，`PlanToolPolicy` 会拒绝与它冲突的取数调用；
-    `search_kb` 的**检索词仍由模型自己组织**（策略里是 `False`）——因为"检索信任边界"
-   （注入过滤 / 来源权威分级 / citation provenance）属于 **Round 4**，本轮不碰。
-    另外：**结构化 Plan 是"应用自己算出来的"，不是用户原文**——它在 system 消息里，
-    与 `search_kb` 回来的原文片段是不同的信任级别，别把两者混为一谈。
+10. **工具范围策略只覆盖"取数范围"，`search_kb` 的检索词仍由模型组织**（泛化 R3/R4）。
+    Planner 返回的 Plan 是这一轮的语义终态，`PlanToolPolicy` 会拒绝与它冲突的**取数**调用；
+    而 `search_kb` 的**检索词**仍由模型自由组织——但它的**版本/时点/门店范围**现在由
+    应用从 Plan **结构化注入**（`as_of/store_id/historical/window/year`）。
+    这些字段**不在给模型看的工具 schema 里**，模型看不到、也无法用措辞（"旧版""当时"）
+    越过 Plan 的 as_of。另外：**结构化 Plan 是"应用自己算出来的"，不是用户原文**——
+    它在 system 消息里，与 `search_kb` 回来的原文片段是不同的信任级别，别把两者混为一谈。
 11. **否定感知排行的两条已知缺口**（泛化 R3，见 `DEBUG_LOG.md` #48）：
     ① 不带关系词的**裸否定**判不出（"不要排名"、"不用帮我排名" 仍会被当成要排行）；
     ② `排行` / `排序` **本身不在** `RANK_WORDS` 里，所以"销量排行""按销量排序"

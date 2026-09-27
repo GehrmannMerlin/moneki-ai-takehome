@@ -736,6 +736,113 @@ preflight 仍 14/14、换库自验仍通过。缺陷根因与修复见 `DEBUG_LO
 
 ---
 
+## §10 Generalization Round 4 回归（RAG Trust, Version & Citation Provenance）
+
+> **这不是新的 live 评分**。R4 改的是**检索的信任边界**：原文 ↔ 安全投影分离、
+> 版本/时点结构化下传、引用绑定到本轮检索凭证、来源权威与注入识别。本节的分数
+> 用来验证"收紧信任边界没有破坏任何已有能力"。自补题库与 scripted 回归
+> **不属于官方分数**，已明确区分。
+
+| 项 | 值 |
+|---|---|
+| 官方公开 mock | **RUN** —— `100.00 / 100.00（55/55 全绿）`，十类全部满分 |
+| 官方公开 live | **NOT RUN** —— 本轮环境没有配置 `LLM_API_KEY`（**不伪造** live 结果） |
+| 自补题库（`moneki_extra_hybrid_eval_bank.*`，用户文件，只读） | **NOT RUN** —— 不以 extra 总分为完成条件 |
+| scripted 回归（`test_rag_trust.py` 32 条 + `test_rag_seal.py` 15 条） | **RUN** —— 47 条全绿（**RED 阶段 18 红 → 实现后全绿**；santize 单独修复先使 3 条转绿，见 §10.3） |
+| 泛化套件合计（R1+R2+R3+R4） | **RUN** —— `pytest tests/generalization` → **137 passed**（R1+R2+R3 的 90 + R4 的 47） |
+| 单元/后端测试 | `pytest tests` → **371 passed, 0 failed**（R3 基线 324 + R4 新增 47） |
+| LLM gateway preflight（P1–P14） | **RUN** —— 14/14 通过（见 §10.2） |
+| 换库自验（anti-hardcode） | **RUN** —— `scripts/swap_check.py` 全绿（含新增文档可被检索、旧数字消失） |
+| git `diff --check` | 无空白错误 |
+
+### §10.1 官方公开 mock（RUN）
+
+```bash
+# 服务以 mock 模式启动（不注入 LLM_* 环境变量）
+cd starter && .venv/Scripts/python -m uvicorn kbqa.server:app --host 127.0.0.1 --port 8123
+# 题库（从仓库根目录）
+python eval/run_eval.py --base-url http://127.0.0.1:8123 \
+    --questions eval/public_questions.jsonl --out eval/_r4_mock
+
+# 分类子集复跑（十类逐一满分）
+for c in retrieval doc metrics data hybrid refusal version multi_turn safety; do
+  python eval/run_eval.py --base-url http://127.0.0.1:8123 \
+      --questions eval/public_questions.jsonl --only "$c"; done
+```
+
+结果：`总分 100.00 / 100.00（100.0%）`，55/55 全绿；九类 `--only` 子集逐一
+`100.0%`（health 单题 N01 恒为 1.00）。与 §7/§8/§9 一致 → **无回退**。
+报告原件 `eval/_r4_mock/report.json`。
+
+> 说明：本轮改动集中在 **live 路径**（`Service.retrieve_for_model` / `LiveEngine` /
+> `citations.py` / `authority.py`）。mock 模式走 `Answerer`，理论上不受影响——
+> 但仍全量复跑，正是为了证明"改动没有从 mock 侧面漏出来"（对照 AI_USAGE 2.18：
+> mock 与 live 是两条链路）。
+
+### §10.2 LLM gateway preflight（RUN）
+
+R4 对协议层零改动，仍需复跑确认"检索范围注入 + 安全投影"没有破坏 DeepSeek 兼容性。
+复用 R3 的驱动模式，本轮用自己的输出目录：
+
+```bash
+# 从仓库根目录（Git Bash 需加 MSYS_NO_PATHCONV=1，见 LLM_SETUP §7.6 的踩坑记录）
+MSYS_NO_PATHCONV=1 starter/.venv/Scripts/python eval/preflight_driver_r4.py
+```
+
+结果：**P1–P14 全部通过（`PREFLIGHT_PASSED=True`）**。关键几项：
+
+| 编号 | 检查项 | 结果 | 实测说明 |
+|---|---|---|---|
+| P1 | 请求确实发到注入的 `LLM_BASE_URL`（含路径前缀） | 通过 | 共观察到 60 次 `POST /ds-gw/chat/completions`。 |
+| P7 | 工具定义规范，且每个工具调用以 `role=tool` + `tool_call_id` 回传 | 通过 | 44 个工具调用的结果都正确回传。 |
+| P8 | 每个场景 `/api/chat` 返回 200 与字段完整 JSON | 通过 | 32 次问答全部 200 + 字段完整。 |
+| P10 | 思考内容没有漏进 `answer`/`citations`/`data_evidence` | 通过 | 32 次回答里思考标记都没有出现在任何对外字段。 |
+| P11 | 在时限内返回（含长时无响应场景） | 通过 | 最慢 123.59 秒（`hang` 场景），都在 180 秒以内。 |
+| P13 | 多轮之间 `reasoning_content` 原样回传（未触发 400） | 通过 | 18 次多轮请求都原样回传了 `reasoning_content`。 |
+
+报告原件 `eval/_r4_preflight/preflight_report.md`。**R4 改的是检索信任边界，
+协议层一字未动**——P4 仍只出现文档列出的顶层参数，P10 思考标记仍只进 trace。
+
+### §10.3 脚本化回归：RED 到 GREEN 的证据链
+
+R4 的红测试先提交（`edb1c24`，**18 failed / 14 passed**，红输出存档 `docs/_r4_red.txt`），
+实现后转绿。收尾新增封印测试（`test_rag_seal.py`，15 条）。**最终 47 条全绿**。
+
+红测试按关注点分四组，逐组先红后绿：
+
+| 组 | 覆盖 | 红→绿 |
+|---|---|---|
+| 信任边界 | 原文/安全投影分离、模型看不到攻击句、trace 留痕、业务制度不被误删 | `test_red01/02/03/03b` |
+| 公开契约 | `/api/retrieve` 仍回原文、凑数片段不进模型 | `test_red04/05` |
+| 版本与时点 | 结构化 as_of、关键词不越权、门店范围、正文元数据、动态 v3 | `test_red06/07/08/09/17/18/19` |
+| 引用溯源 | 未见文档不可引、quote 来自本轮 chunk、逐字、≤400、指令句不回流 | `test_red10/11/12/13/14/20/21/22` |
+
+两条**始终为绿**的反向护栏（防止"为了安全把正常业务也删了"）：
+
+| 护栏 | 断言 |
+|---|---|
+| `test_red03_legitimate_business_instruction_survives_sanitizer` | "员工必须佩戴手套""门店必须每日消毒"等正经制度不被 sanitize 误删 |
+| `test_data_only_answer_needs_no_citation` | `intent=data` 只用数据库事实时，`citations=[]` 完全合法 |
+| `test_red16_background_document_still_usable_for_explanation` | 背景/估算文档仍能回答"为什么"这类解释性问题（只是不能为数字背书） |
+
+与 §9（R3）逐项对比**无退化**：公开 mock 仍 100/100、泛化套件 137 全绿、
+preflight 仍 14/14、换库自验仍通过。缺陷根因与修复见 `DEBUG_LOG.md` #52–#59。
+方法论复盘（安全边界是数据流、红测试自己写错、红集合是滚动的）见 `AI_USAGE.md` 2.28–2.30。
+
+### §10.4 定向 live 复验（NOT RUN —— 未配置 Key）
+
+按 R4 的目标（信任边界），一旦配置 `LLM_API_KEY`，建议定向复验
+`S01`（注入文档）、`V01/V03`（版本与 as-of）、`C01/C07`（文档引用），判断标准是：
+
+* trace 里出现 `retrieval_scope` / `retrieval_filtered` / `citation_selected`，
+  且 `source_authority` 标出每篇的权威等级；
+* `S01` 的回答与 citations 里**不出现** KB-060 里那个 9,999,999 的注入数字；
+* `V01/V03` 的引用落在正确的版本上（当时 vs 现在），且**不依赖** query 里的魔法词。
+
+本机没有可用真实 Key（`LLM_API_KEY` 未配置），**不伪造**任何 live 数字。
+
+---
+
 ## 附：怎么复现这张表
 
 ```bash
