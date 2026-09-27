@@ -24,6 +24,13 @@ eval/_r4_*/
 eval/_*_service.log
 eval/_*_run.txt
 eval/_live*_doc/
+eval/r6_runs/
+eval/r6_holdout/
+eval/r6_report.json
+eval/r6_report.md
+eval/r6_live_public/
+eval/r6_live_extra/
+eval/r6_live_repeat/
 eval/report.md
 eval/__pycache__/
 docs/_*.txt

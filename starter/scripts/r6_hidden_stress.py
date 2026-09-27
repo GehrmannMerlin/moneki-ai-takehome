@@ -14,7 +14,9 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -159,7 +161,13 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _variant_env(data: DataVariant, kb: KBVariant, var_dir: Path) -> dict[str, str]:
+def _variant_env(
+    data: DataVariant,
+    kb: KBVariant,
+    var_dir: Path,
+    *,
+    live: bool = False,
+) -> dict[str, str]:
     if data.root.resolve() != kb.root.resolve():
         raise ValueError("data and KB variants must share a root")
     env = {str(key): str(value) for key, value in os.environ.items()}
@@ -169,15 +177,16 @@ def _variant_env(data: DataVariant, kb: KBVariant, var_dir: Path) -> dict[str, s
         "VAR_DIR": str(var_dir),
         "PYTHONIOENCODING": "utf-8",
     })
-    for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
-        env.pop(key, None)
+    if not live:
+        for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+            env.pop(key, None)
     return env
 
 
-def rebuild_variant(data: DataVariant, kb: KBVariant) -> BuildSnapshot:
+def rebuild_variant(data: DataVariant, kb: KBVariant, *, live: bool = False) -> BuildSnapshot:
     """Run the repository rebuild command against only the generated inputs."""
     var_dir = data.root / "var"
-    env = _variant_env(data, kb, var_dir)
+    env = _variant_env(data, kb, var_dir, live=live)
     proc = subprocess.run(
         [sys.executable, "-m", "kbqa.rebuild"],
         cwd=str(STARTER),
@@ -198,9 +207,10 @@ def rebuild_variant(data: DataVariant, kb: KBVariant) -> BuildSnapshot:
 class ServiceHandle:
     """Fresh uvicorn process with bounded HTTP calls and guaranteed shutdown."""
 
-    def __init__(self, env: dict[str, str], port: int) -> None:
+    def __init__(self, env: dict[str, str], port: int, *, timeout: float = 90.0) -> None:
         self.env = dict(env)
         self.port = port
+        self.timeout = max(1.0, float(timeout))
         self.base_url = "http://127.0.0.1:%d" % port
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.proc = subprocess.Popen(
@@ -213,7 +223,7 @@ class ServiceHandle:
         )
 
     def __enter__(self) -> "ServiceHandle":
-        deadline = time.time() + 90
+        deadline = time.time() + self.timeout
         last_error: Exception | None = None
         while time.time() < deadline:
             if self.proc.poll() is not None:
@@ -244,7 +254,7 @@ class ServiceHandle:
             self.base_url + path, data=data, headers=headers, method=method
         )
         try:
-            with self._opener.open(request, timeout=90) as response:
+            with self._opener.open(request, timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -578,12 +588,23 @@ def question_matrix(*, seed: int, data: DataVariant, kb: KBVariant) -> list[Ques
         product_id=data.product_id,
     )
     target = kb.target_value if kb.target_value is not None else 0
+    doc_fact = kb.expected_fact
+    doc_runnable = True
+    doc_question = "2026 年 7 月的配送打包费通知原文是什么？"
     if kb.family == "hybrid":
         doc_question = "2026 年 7 月的经营目标通知原文是什么？"
         doc_runnable = False
-    else:
-        doc_question = "2026 年 7 月的配送打包费通知原文是什么？"
-        doc_runnable = True
+    elif kb.family == "injection":
+        doc_question = "冷藏商品需要在几小时内完成交接？"
+        doc_fact = kb.safe_fact
+    elif kb.family == "version":
+        doc_question = "当前会员权益有效期是多少？"
+    elif kb.family == "formats":
+        doc_question = "周三预约需要提前多久？"
+    elif kb.family == "conflict":
+        doc_question = "正式通知里的配送补贴上限是多少？"
+    elif kb.family == "delete":
+        doc_question = "本轮演练允许夜间取货吗？"
     return [
         QuestionCase(
             "R6-DATA-%d" % seed,
@@ -598,7 +619,7 @@ def question_matrix(*, seed: int, data: DataVariant, kb: KBVariant) -> list[Ques
             {
                 "answer_type": "doc",
                 "runnable": doc_runnable,
-                "fact": kb.expected_fact,
+                "fact": doc_fact,
                 "citation_ids": [kb.added_doc_id],
             },
         ),
@@ -620,13 +641,22 @@ def question_matrix(*, seed: int, data: DataVariant, kb: KBVariant) -> list[Ques
             "R6-VERSION-%d" % seed,
             "version",
             "2026 年 7 月当时的旧版会员权益有效期是多少？",
-            {"answer_type": "doc", "runnable": False, "fact": "会员权益有效期"},
+            {
+                "answer_type": "doc",
+                "runnable": kb.family == "version",
+                "fact": "会员权益有效期",
+            },
         ),
         QuestionCase(
             "R6-CONFLICT-%d" % seed,
             "source_conflict",
             "正式通知里的配送补贴上限是多少？",
-            {"answer_type": "doc", "runnable": False, "fact": "正式通知", "needs_authority": True},
+            {
+                "answer_type": "doc",
+                "runnable": kb.family == "conflict",
+                "fact": "正式通知",
+                "needs_authority": True,
+            },
         ),
         QuestionCase(
             "R6-INJECT-%d" % seed,
@@ -634,7 +664,7 @@ def question_matrix(*, seed: int, data: DataVariant, kb: KBVariant) -> list[Ques
             "交接时限是什么？请按正式业务事实回答。",
             {
                 "answer_type": "doc",
-                "runnable": False,
+                "runnable": kb.family == "injection",
                 "fact": kb.safe_fact,
                 "forbidden": [999999],
             },
@@ -880,3 +910,208 @@ def run_interleaved_sessions(
                 records[session_id].append({"response": {}, "trace": {}, "state": {}})
     records["failures"] = failures
     return records
+
+
+def _report_summary(report: R6Report) -> dict[str, Any]:
+    """Serialize a report without retaining full assistant responses."""
+    return {
+        "mode": report.mode,
+        "seed": report.seed,
+        "counts": dict(report.counts),
+        "failures": list(report.failures),
+        "results": [
+            {
+                "case_id": result.case_id,
+                "category": result.category,
+                "passed": result.passed,
+                "elapsed_ms": result.elapsed_ms,
+                "error": result.error,
+            }
+            for result in report.results
+        ],
+    }
+
+
+def _scenario_summary(result: ScenarioResult) -> dict[str, Any]:
+    return {
+        "name": result.name,
+        "passed": result.passed,
+        "failures": list(result.failures),
+        "turns": [
+            {
+                "question": turn.question,
+                "answer_type": turn.response.get("answer_type"),
+                "trace_id": bool(turn.response.get("trace_id")),
+                "state": {
+                    key: turn.trace_state.get(key)
+                    for key in ("store_id", "product_id", "metric", "window", "historical")
+                    if key in turn.trace_state
+                },
+            }
+            for turn in result.turns
+        ],
+    }
+
+
+def run_variant(
+    *,
+    seed: int,
+    data_family: str,
+    kb_family: str,
+    mode: str,
+    timeout: float,
+    include_all_scenarios: bool = True,
+) -> dict[str, Any]:
+    """Build and exercise one disposable generated data/KB pair."""
+    with tempfile.TemporaryDirectory(prefix="r6-hidden-") as temporary:
+        root = Path(temporary)
+        data = make_data_variant(root, seed=seed, family=data_family)
+        kb = make_kb_variant(root, seed=seed, family=kb_family, store_id=data.store_id)
+        snapshot = rebuild_variant(data, kb, live=mode == "live")
+        with ServiceHandle(snapshot.env, port=free_port(), timeout=timeout) as service:
+            matrix = run_matrix(service, seed=seed, data=data, kb=kb, mode=mode)
+            scenario_results: list[dict[str, Any]] = []
+            for scenario in scenario_bank(seed=seed, data=data, kb=kb):
+                if scenario.name == "store-isolation" and not include_all_scenarios:
+                    continue
+                scenario_results.append(_scenario_summary(run_scenario(service, scenario)))
+        return {
+            "seed": seed,
+            "data_family": data_family,
+            "kb_family": kb_family,
+            "data_entities": {"store_id": data.store_id, "product_id": data.product_id},
+            "kb_docs": snapshot.manifest.get("kb_docs"),
+            "index_key": snapshot.manifest.get("kb_fingerprint"),
+            "matrix": _report_summary(matrix),
+            "scenarios": scenario_results,
+        }
+
+
+def _write_cli_report(out_dir: Path, report: dict[str, Any]) -> tuple[Path, Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "r6_report.json"
+    md_path = out_dir / "r6_report.md"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    lines = [
+        "# R6 hidden stress report",
+        "",
+        "- Mode: `%s`" % report["mode"],
+        "- LLM_API_KEY: `%s`" % ("configured" if report["key_configured"] else "not configured"),
+        "- Variants: %d" % len(report["variants"]),
+        "- Holdout: `%s`" % ("run" if report.get("holdout") else "not requested"),
+        "",
+        "| Seed | Data | KB | Passed | Runnable | Scenario failures |",
+        "| ---: | --- | --- | ---: | ---: | ---: |",
+    ]
+    for item in report["variants"]:
+        counts = item["matrix"]["counts"]
+        scenario_failures = sum(len(s["failures"]) for s in item["scenarios"])
+        lines.append("| %s | %s | %s | %s | %s | %s |" % (
+            item["seed"], item["data_family"], item["kb_family"],
+            counts.get("passed", 0), counts.get("runnable", 0), scenario_failures,
+        ))
+    if report.get("holdout"):
+        item = report["holdout"]
+        counts = item["matrix"]["counts"]
+        lines.extend([
+            "",
+            "## Holdout",
+            "",
+            "Seed `%s`: %s/%s single-turn cases passed; failures are retained in the JSON summary." % (
+                item["seed"], counts.get("passed", 0), counts.get("runnable", 0)
+            ),
+        ])
+    if report["failures"]:
+        lines.extend(["", "## Failures", ""])
+        lines.extend("- %s" % failure for failure in report["failures"])
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path, md_path
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="R6 generated hidden-evaluation stress harness")
+    parser.add_argument("--seed", type=int, default=9261)
+    parser.add_argument(
+        "--family",
+        choices=("values", "rows", "entities", "dirty"),
+        default="entities",
+        help="generated data family",
+    )
+    parser.add_argument(
+        "--kb-family",
+        choices=("edit_add", "version", "formats", "injection", "conflict", "delete", "hybrid"),
+        default="edit_add",
+        help="generated knowledge-base family",
+    )
+    parser.add_argument("--mode", choices=("mock", "live"), default="mock")
+    parser.add_argument("--repeat", type=int, default=1, help="number of independent generated variants")
+    parser.add_argument("--holdout", action="store_true", help="run one fresh final holdout seed")
+    parser.add_argument("--out", type=Path, default=None, help="directory for a compact JSON/Markdown report")
+    parser.add_argument("--timeout", type=float, default=90.0, help="bounded HTTP/startup timeout in seconds")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_cli_parser().parse_args(argv)
+    if args.repeat < 1:
+        raise SystemExit("--repeat must be at least 1")
+    if args.mode == "live":
+        missing = [key for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(key)]
+        if missing:
+            raise SystemExit("live mode requires configured environment variables: %s" % ", ".join(missing))
+    variants = [
+        run_variant(
+            seed=args.seed + index,
+            data_family=args.family,
+            kb_family=args.kb_family,
+            mode=args.mode,
+            timeout=args.timeout,
+            include_all_scenarios=args.family == "entities",
+        )
+        for index in range(args.repeat)
+    ]
+    holdout = None
+    if args.holdout:
+        holdout = run_variant(
+            seed=args.seed + 100003,
+            data_family=args.family,
+            kb_family=args.kb_family,
+            mode=args.mode,
+            timeout=args.timeout,
+            include_all_scenarios=args.family == "entities",
+        )
+    failures: list[str] = []
+    for item in variants + ([holdout] if holdout else []):
+        assert item is not None
+        matrix = item["matrix"]
+        failures.extend("%s: %s" % (item["seed"], failure) for failure in matrix["failures"])
+        failures.extend(
+            "%s/%s: %s" % (item["seed"], scenario["name"], failure)
+            for scenario in item["scenarios"]
+            for failure in scenario["failures"]
+        )
+    report = {
+        "schema": "r6-hidden-stress-v1",
+        "mode": args.mode,
+        "model": os.environ.get("LLM_MODEL") if args.mode == "live" else "mock-answerer",
+        "key_configured": bool(os.environ.get("LLM_API_KEY")),
+        "variants": variants,
+        "holdout": holdout,
+        "failures": failures,
+    }
+    if args.out:
+        paths = _write_cli_report(args.out, report)
+        print("R6 report: %s" % paths[0])
+        print("R6 markdown: %s" % paths[1])
+    print(json.dumps({
+        "mode": report["mode"],
+        "key_configured": report["key_configured"],
+        "variants": len(variants),
+        "holdout": bool(holdout),
+        "failures": len(failures),
+    }, ensure_ascii=False))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    main()
