@@ -131,6 +131,8 @@ class FollowUps:
             "recent_windows": list(state.recent_windows),
             "as_of": state.as_of,
             "historical": state.historical,
+            "intent": state.intent,
+            "kind": state.kind,
             "topic_query": state.topic_query,
             "topic_kind": state.topic_kind,
             "source_anchors": list(state.source_anchors),

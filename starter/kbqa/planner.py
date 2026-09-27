@@ -343,8 +343,24 @@ class Planner:
                 or operator in ("actual", "dimension_shift", "reason", "comparison")
             ))
         )
+        preserve_state_kind = bool(
+            plan.continuation
+            and not inherited.get("topic_shift")
+            and not explicit_metric
+            and not asks_payment
+            and not asks_business
+            and not asks_rank
+            and inherited.get("kind") in {
+                "doc", "summary", "price", "payment", "target", "anomaly",
+                "daily", "top_products", "category", "by_store", "compare",
+            }
+        )
         compares = len(windows) > 1 and E.has_any(text, E.TREND_WORDS)
-        if asks_target:
+        if preserve_state_kind:
+            plan.kind = inherited["kind"]
+            plan.intent = inherited.get("intent") or ("doc" if plan.kind == "doc" else "data")
+            plan.slots["state_kind_inherited"] = True
+        elif asks_target:
             plan.kind, plan.intent = "target", "hybrid"
         elif asks_price and plan.product_id:
             plan.kind, plan.intent = "price", "hybrid"
