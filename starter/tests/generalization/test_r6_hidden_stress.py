@@ -91,3 +91,43 @@ def test_data_families_are_reproducible_and_change_with_seed(tmp_path):
     assert first.db_path.read_bytes() == same.db_path.read_bytes()
     assert first.db_path.read_bytes() != other.db_path.read_bytes()
     assert first.db_path.parent != other.db_path.parent
+
+
+def test_kb_document_oracle_reads_mutated_source_and_contiguous_quote(tmp_path):
+    variant = r6.make_kb_variant(tmp_path / "kb-variant", seed=9151, family="edit_add")
+
+    assert variant.added_doc_id not in {"KB-001", "KB-013", "KB-060"}
+    assert variant.edited_doc_id
+    assert variant.expected_fact
+    assert variant.kb_dir.exists()
+
+    result = r6.document_oracle(
+        variant.kb_dir,
+        doc_id=variant.added_doc_id,
+        expected_fact=variant.expected_fact,
+    )
+
+    assert result["doc_id"] == variant.added_doc_id
+    assert variant.expected_fact in result["visible_text"]
+    assert variant.expected_fact in result["quote"]
+    assert result["raw_contains_attack"] is False
+    assert len("".join(result["quote"].split())) <= 400
+
+
+def test_kb_families_are_seeded_and_preserve_injection_metadata(tmp_path):
+    versions = r6.make_kb_variant(tmp_path / "versions", seed=9152, family="version")
+    formats = r6.make_kb_variant(tmp_path / "formats", seed=9153, family="formats")
+    injection = r6.make_kb_variant(tmp_path / "injection", seed=9154, family="injection")
+
+    assert versions.version_doc_ids == [
+        versions.version_doc_ids[0],
+        versions.version_doc_ids[1],
+        versions.version_doc_ids[2],
+    ]
+    assert all(doc_id.startswith("KB-") for doc_id in versions.version_doc_ids)
+    assert {path.suffix.lower() for path in formats.kb_dir.rglob("*") if path.is_file()} >= {
+        ".md", ".txt", ".html"
+    }
+    assert injection.raw_attack
+    assert injection.safe_fact
+    assert injection.raw_attack in injection.attack_source.read_text(encoding="utf-8")
